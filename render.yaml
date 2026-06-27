@@ -1,0 +1,37 @@
+services:
+  - type: web
+    name: vidipay-backend
+    runtime: node
+    plan: standard
+    buildCommand: node render-build-fix.cjs && npm ci --omit=dev
+    startCommand: npm start
+    healthCheckPath: /healthz
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PAYMENT_SCANNER_ENABLED
+        value: false
+      - key: RATE_LIMIT_BACKEND
+        value: redis
+      - key: REDIS_URL
+        sync: false
+      - key: SETTINGS_CACHE_TTL_MS
+        value: 1500
+      - key: REQUEST_SLOW_MS
+        value: 1500
+      - key: SERVER_KEEP_ALIVE_TIMEOUT_MS
+        value: 65000
+      - key: SERVER_HEADERS_TIMEOUT_MS
+        value: 70000
+      - key: SERVER_REQUEST_TIMEOUT_MS
+        value: 120000
+      - key: SHUTDOWN_GRACE_MS
+        value: 25000
+      - key: CAPACITY_INITIAL_USERS
+        value: 100000
+      - key: CAPACITY_TARGET_USERS
+        value: 1500000
+      - key: TON_AUTO_PAYOUT_ENABLED
+        value: false
+      - key: TON_SIGNER_ENABLED
+        value: false
