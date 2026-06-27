@@ -1,131 +1,195 @@
-const fs = require("fs");
-const path = require("path");
-const crypto = require("crypto");
+const DEFAULT_TIMEOUT_MS = 12000;
 
-function readArg(name, fallback = "") {
-  const prefix = `--${name}=`;
-  const direct = process.argv.find((item) => item.startsWith(prefix));
-  if (direct) return direct.slice(prefix.length);
-
-  const index = process.argv.indexOf(`--${name}`);
-  if (index >= 0 && process.argv[index + 1]) return process.argv[index + 1];
-  return fallback;
+function readEnv(name, fallback = "") {
+  return String(process.env[name] || fallback).trim();
 }
 
-function walkFiles(root, matcher, results = []) {
-  if (!fs.existsSync(root)) return results;
-  const entries = fs.readdirSync(root, { withFileTypes: true });
-  for (const entry of entries) {
-    const fullPath = path.join(root, entry.name);
-    if (entry.isDirectory()) {
-      walkFiles(fullPath, matcher, results);
-    } else if (!matcher || matcher(fullPath)) {
-      results.push(fullPath);
-    }
+function normalizeBaseUrl(value) {
+  const url = String(value || "").trim().replace(/\/+$/, "");
+  if (!/^https?:\/\//i.test(url)) {
+    throw new Error("BASE_URL must start with http:// or https://");
   }
-  return results;
+  return url;
 }
 
-function countLines(filePath) {
-  let count = 0;
-  const content = fs.readFileSync(filePath, "utf8");
-  for (const char of content) {
-    if (char === "\n") count += 1;
-  }
-  return content ? count + (content.endsWith("\n") ? 0 : 1) : 0;
-}
+async function requestJson(baseUrl, item) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), item.timeoutMs || DEFAULT_TIMEOUT_MS);
+  const startedAt = Date.now();
 
-function sha256(filePath) {
-  return crypto.createHash("sha256").update(fs.readFileSync(filePath)).digest("hex");
-}
-
-function countSqlRows(filePath) {
-  const content = fs.readFileSync(filePath, "utf8");
-  const matches = content.match(/\('TON',\s*'TON',\s*'[^']+'\)/g);
-  return matches ? matches.length : 0;
-}
-
-function validateWalletJson(filePath) {
   try {
-    const data = JSON.parse(fs.readFileSync(filePath, "utf8"));
-    return Boolean(data.address && (data.mnemonic || data.seed_hex));
-  } catch {
-    return false;
+    const response = await fetch(`${baseUrl}${item.path}`, {
+      method: item.method || "GET",
+      headers: item.headers || {},
+      signal: controller.signal
+    });
+    const text = await response.text();
+    let body = null;
+    try {
+      body = text ? JSON.parse(text) : null;
+    } catch {
+      body = text;
+    }
+
+    let statusOk = response.status >= 200 && response.status < 400;
+    if (Array.isArray(item.expectedStatus)) {
+      statusOk = item.expectedStatus.includes(response.status);
+    } else if (Number.isInteger(item.expectedStatus)) {
+      statusOk = response.status === item.expectedStatus;
+    }
+    const bodyOk = typeof item.bodyOk === "function" ? item.bodyOk(body) : true;
+
+    return {
+      name: item.name,
+      path: item.path,
+      ok: statusOk && bodyOk,
+      status: response.status,
+      ms: Date.now() - startedAt,
+      body,
+      error: statusOk ? (bodyOk ? "" : "unexpected response body") : `unexpected status ${response.status}`
+    };
+  } catch (error) {
+    return {
+      name: item.name,
+      path: item.path,
+      ok: false,
+      status: 0,
+      ms: Date.now() - startedAt,
+      error: error.message
+    };
+  } finally {
+    clearTimeout(timeout);
   }
 }
 
-function writeJson(filePath, data) {
-  fs.writeFileSync(filePath, JSON.stringify(data, null, 2), "utf8");
+function summarizeResult(result) {
+  const status = result.ok ? "OK" : "FAIL";
+  const statusCode = result.status || "ERR";
+  const error = result.error ? ` - ${result.error}` : "";
+  return `${status} ${result.name} ${statusCode} ${result.ms}ms${error}`;
 }
 
 async function main() {
-  const poolDir = path.resolve(readArg("pool", process.cwd()));
-  const expectedCount = Number(readArg("expected-count", "0"));
-  const failOnPrivateKeysMissing = readArg("require-private-keys", "true") !== "false";
+  const baseUrl = normalizeBaseUrl(readEnv("BASE_URL"));
+  const testTelegramId = readEnv("TEST_TG_ID");
+  const adminToken = readEnv("ADMIN_TOKEN");
+  const expectedVersion = readEnv("EXPECTED_VERSION");
 
-  if (!fs.existsSync(poolDir)) {
-    throw new Error(`Pool folder not found: ${poolDir}`);
+  const checks = [
+    {
+      name: "healthz",
+      path: "/healthz",
+      bodyOk: body => body && body.status === "ok" && (!expectedVersion || body.version === expectedVersion)
+    },
+    {
+      name: "readyz",
+      path: "/readyz",
+      bodyOk: body => body && body.status === "ready" && (!expectedVersion || body.version === expectedVersion)
+    },
+    {
+      name: "root",
+      path: "/",
+      bodyOk: body => body && body.status === "online" && (!expectedVersion || body.version === expectedVersion)
+    },
+    {
+      name: "scanner public health",
+      path: "/scanner/healthz",
+      bodyOk: body => body && ["ok", "stale", "unavailable"].includes(body.status)
+    },
+    {
+      name: "ops readiness",
+      path: "/ops/readiness",
+      bodyOk: body => body && ["ready", "action_required", "not_ready"].includes(body.status)
+    },
+    {
+      name: "ops metrics",
+      path: "/ops/metrics",
+      bodyOk: body => body && typeof body.uptime_seconds === "number"
+    },
+    {
+      name: "ops capacity",
+      path: "/ops/capacity",
+      bodyOk: body => body && body.capacity && ["ready", "warning", "blocked"].includes(body.capacity.status)
+    },
+    {
+      name: "ops deploy",
+      path: "/ops/deploy",
+      bodyOk: body => body && ["ready", "action_required", "not_ready"].includes(body.status)
+    },
+    {
+      name: "ops live",
+      path: "/ops/live",
+      bodyOk: body => body && ["ready", "action_required", "not_ready"].includes(body.status)
+    },
+    {
+      name: "settings",
+      path: "/settings",
+      bodyOk: body => body
+        && Number(body.activation_deposit_amount) > 0
+        && Number(body.payment_min_received_amount) > 0
+        && Number(body.payment_max_received_amount) >= Number(body.payment_min_received_amount)
+    },
+    {
+      name: "admin protected without token",
+      path: "/admin/users?limit=1&page=1",
+      expectedStatus: [401, 403]
+    }
+  ];
+
+  if (testTelegramId) {
+    checks.push({
+      name: "payment status",
+      path: `/payment/status/${encodeURIComponent(testTelegramId)}`
+    });
+    checks.push({
+      name: "notifications",
+      path: `/notifications/${encodeURIComponent(testTelegramId)}`
+    });
+    checks.push({
+      name: "history",
+      path: `/history/${encodeURIComponent(testTelegramId)}`
+    });
   }
 
-  const sqlFiles = fs.readdirSync(poolDir)
-    .filter((name) => /^public-addresses-\d+\.sql$/i.test(name))
-    .sort()
-    .map((name) => path.join(poolDir, name));
-  const privateDir = path.join(poolDir, "private-keys");
-  const privateKeyFiles = walkFiles(privateDir, (file) => file.endsWith(".json"));
-  const manifestPath = path.join(poolDir, "wallet-manifest.public.jsonl");
-  const csvPath = path.join(poolDir, "wallets-summary.csv");
+  if (adminToken) {
+    const headers = { "X-Admin-Token": adminToken };
+    checks.push(
+      { name: "admin users", path: "/admin/users?limit=20&page=1", headers },
+      { name: "admin withdraws", path: "/admin/withdraws?status=pending&limit=20&page=1", headers },
+      { name: "admin payment orders", path: "/admin/payment-orders?status=pending&limit=20&page=1", headers },
+      { name: "admin payment wallets", path: "/admin/payment-wallets", headers },
+      {
+        name: "admin payment scanner",
+        path: "/admin/payment-scanner/status",
+        headers,
+        bodyOk: body => body && typeof body.heartbeat_available === "boolean"
+      }
+    );
+  }
 
-  let sqlRowCount = 0;
-  const sqlBatches = sqlFiles.map((filePath) => {
-    const rows = countSqlRows(filePath);
-    sqlRowCount += rows;
-    return {
-      file: path.basename(filePath),
-      rows,
-      sha256: sha256(filePath)
-    };
-  });
+  const results = [];
+  for (const check of checks) {
+    const result = await requestJson(baseUrl, check);
+    results.push(result);
+    console.log(summarizeResult(result));
+  }
 
-  const manifestLines = fs.existsSync(manifestPath) ? countLines(manifestPath) : 0;
-  const csvLines = fs.existsSync(csvPath) ? Math.max(0, countLines(csvPath) - 1) : 0;
-  const invalidPrivateFiles = privateKeyFiles.slice(0, 1000).filter((file) => !validateWalletJson(file));
+  const failed = results.filter((item) => !item.ok);
+  const slow = results.filter((item) => item.ms > 1500);
 
-  const checks = {
-    pool_dir_exists: fs.existsSync(poolDir),
-    sql_batches_found: sqlFiles.length > 0,
-    sql_rows_match_expected: expectedCount > 0 ? sqlRowCount === expectedCount : true,
-    manifest_matches_sql_rows: manifestLines === sqlRowCount,
-    csv_matches_sql_rows: csvLines === sqlRowCount,
-    private_keys_present: failOnPrivateKeysMissing ? privateKeyFiles.length === sqlRowCount : true,
-    private_key_sample_valid: invalidPrivateFiles.length === 0
-  };
+  console.log("");
+  console.log(`Checked: ${results.length}`);
+  console.log(`Failed: ${failed.length}`);
+  console.log(`Slow over 1500ms: ${slow.length}`);
 
-  const report = {
-    status: Object.values(checks).every(Boolean) ? "ok" : "failed",
-    pool_dir: poolDir,
-    expected_count: expectedCount || null,
-    sql_batch_count: sqlFiles.length,
-    sql_row_count: sqlRowCount,
-    manifest_rows: manifestLines,
-    csv_rows: csvLines,
-    private_key_files: privateKeyFiles.length,
-    invalid_private_key_sample_count: invalidPrivateFiles.length,
-    checks,
-    sql_batches: sqlBatches
-  };
-
-  const reportPath = path.join(poolDir, "wallet-pool-verification-report.json");
-  writeJson(reportPath, report);
-
-  console.log(`Wallet pool verification: ${report.status}`);
-  console.log(`SQL rows: ${sqlRowCount}`);
-  console.log(`Manifest rows: ${manifestLines}`);
-  console.log(`CSV rows: ${csvLines}`);
-  console.log(`Private key files: ${privateKeyFiles.length}`);
-  console.log(`Report: ${reportPath}`);
-
-  if (report.status !== "ok") process.exitCode = 1;
+  if (failed.length) {
+    process.exitCode = 1;
+    console.log("");
+    console.log("Failed checks:");
+    for (const item of failed) {
+      console.log(`- ${item.name}: ${item.error || "failed"}`);
+    }
+  }
 }
 
 main().catch((error) => {

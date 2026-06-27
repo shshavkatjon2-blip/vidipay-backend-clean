@@ -1,155 +1,151 @@
-const DEFAULT_BASE_URL = "https://vidipay-backend.onrender.com";
-const EXPECTED_VERSION = "v1.7.8-1-5m-runtime-capacity-20260627";
-const DEFAULT_TIMEOUT_MS = 15000;
-
-function readEnv(name, fallback = "") {
-  return String(process.env[name] || fallback).trim();
+function value(name) {
+  return String(process.env[name] || "").trim();
 }
 
-function normalizeBaseUrl(value) {
-  const url = String(value || DEFAULT_BASE_URL).trim().replace(/\/+$/, "");
-  if (!/^https?:\/\//i.test(url)) {
-    throw new Error("BASE_URL must start with http:// or https://");
-  }
-  return url;
-}
-
-async function getJson(baseUrl, path) {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), DEFAULT_TIMEOUT_MS);
-  const startedAt = Date.now();
+function isHttpsUrl(raw) {
   try {
-    const response = await fetch(`${baseUrl}${path}`, { signal: controller.signal });
-    const text = await response.text();
-    let body = null;
-    try {
-      body = text ? JSON.parse(text) : null;
-    } catch {
-      body = text;
-    }
-    return {
-      path,
-      status: response.status,
-      ok: response.status >= 200 && response.status < 400,
-      ms: Date.now() - startedAt,
-      body
-    };
-  } catch (error) {
-    return {
-      path,
-      status: 0,
-      ok: false,
-      ms: Date.now() - startedAt,
-      body: null,
-      error: error.message
-    };
-  } finally {
-    clearTimeout(timeout);
+    const parsed = new URL(raw);
+    return parsed.protocol === "https:";
+  } catch {
+    return false;
   }
 }
 
-function statusLine(name, result, extra = "") {
-  const mark = result.ok ? "OK" : "FAIL";
-  const code = result.status || "ERR";
-  const detail = result.error ? ` error=${result.error}` : "";
-  const suffix = extra ? ` ${extra}${detail}` : detail;
-  return `${mark} ${name} ${code} ${result.ms}ms${suffix}`;
+function parseNumber(name, fallback = NaN) {
+  const raw = value(name);
+  if (!raw) return fallback;
+  return Number(raw);
 }
 
-function isExpectedVersion(body) {
-  return body && body.version === EXPECTED_VERSION;
+function addMissing(errors, names) {
+  for (const name of names) {
+    if (!value(name)) errors.push(`Missing ${name}`);
+  }
 }
 
-function scannerAdvice(scanner) {
-  if (!scanner || typeof scanner !== "object") return "scanner health response is missing";
-  if (scanner.status === "ok" && scanner.scanner_worker_alive === true) {
-    return "scanner worker heartbeat is fresh";
-  }
-  if (scanner.status === "stale") {
-    return "scanner worker is not heartbeating; check Background Worker service, start command, env, and heartbeat SQL";
-  }
-  if (scanner.status === "unavailable") {
-    return "scanner heartbeat table is unavailable; run COPY_THIS_SCANNER_HEARTBEAT_SQL_1_5M.sql in Supabase";
-  }
-  return `scanner status is ${scanner.status || "unknown"}`;
-}
-
-async function main() {
-  const baseUrl = normalizeBaseUrl(readEnv("BASE_URL", DEFAULT_BASE_URL));
-  const results = {};
-
-  for (const [name, path] of [
-    ["healthz", "/healthz"],
-    ["readyz", "/readyz"],
-    ["settings", "/settings"],
-    ["scanner", "/scanner/healthz"],
-    ["readiness", "/ops/readiness"],
-    ["metrics", "/ops/metrics"],
-    ["capacity", "/ops/capacity"],
-    ["deploy", "/ops/deploy"],
-    ["live", "/ops/live"],
-    ["root", "/"]
-  ]) {
-    results[name] = await getJson(baseUrl, path);
-  }
-
-  const healthVersionOk = isExpectedVersion(results.healthz.body);
-  const readyVersionOk = isExpectedVersion(results.readyz.body);
-  const settingsVersionOk = isExpectedVersion(results.settings.body);
-  const readinessVersionOk = isExpectedVersion(results.readiness.body);
-  const metricsVersionOk = isExpectedVersion(results.metrics.body);
-  const capacityVersionOk = isExpectedVersion(results.capacity.body);
-  const deployVersionOk = isExpectedVersion(results.deploy.body);
-  const liveVersionOk = isExpectedVersion(results.live.body);
-  const scanner = results.scanner.body;
-  const scannerOk = scanner && scanner.status === "ok" && scanner.scanner_worker_alive === true;
-
-  console.log(statusLine("healthz", results.healthz, healthVersionOk ? "version-ok" : "version-mismatch"));
-  console.log(statusLine("readyz", results.readyz, readyVersionOk ? "version-ok" : "version-mismatch"));
-  console.log(statusLine("settings", results.settings, settingsVersionOk ? "version-ok" : "version-mismatch"));
-  console.log(statusLine("scanner", results.scanner, scannerAdvice(scanner)));
-  console.log(statusLine("readiness", results.readiness, readinessVersionOk ? `status=${results.readiness.body?.status || "unknown"}` : "version-mismatch"));
-  console.log(statusLine("metrics", results.metrics, metricsVersionOk ? "version-ok" : "version-mismatch"));
-  console.log(statusLine("capacity", results.capacity, capacityVersionOk ? `status=${results.capacity.body?.capacity?.status || "unknown"}` : "version-mismatch"));
-  console.log(statusLine("deploy", results.deploy, deployVersionOk ? `status=${results.deploy.body?.status || "unknown"}` : "version-mismatch"));
-  console.log(statusLine("live", results.live, liveVersionOk ? `status=${results.live.body?.status || "unknown"}` : "version-mismatch"));
-  console.log(statusLine("root", results.root));
-
-  console.log("");
-  console.log(`base_url=${baseUrl}`);
-  console.log(`expected_version=${EXPECTED_VERSION}`);
-  console.log(`scanner_status=${scanner?.status || "unknown"}`);
-  console.log(`scanner_worker_alive=${scanner?.scanner_worker_alive}`);
-  console.log(`heartbeat_stale=${scanner?.heartbeat_stale}`);
-  console.log(`latest_seen_at=${scanner?.latest_seen_at || ""}`);
-
-  const failures = [];
-  for (const [name, result] of Object.entries(results)) {
-    if (!result.ok) failures.push(`${name} request failed`);
-  }
-  if (!healthVersionOk) failures.push("healthz version is not the expected package version");
-  if (!readyVersionOk) failures.push("readyz version is not the expected package version");
-  if (!settingsVersionOk) failures.push("settings version is not the expected package version");
-  if (!readinessVersionOk) failures.push("readiness version is not the expected package version");
-  if (!metricsVersionOk) failures.push("metrics version is not the expected package version");
-  if (!capacityVersionOk) failures.push("capacity version is not the expected package version");
-  if (!deployVersionOk) failures.push("deploy version is not the expected package version");
-  if (!liveVersionOk) failures.push("live version is not the expected package version");
-  if (!scannerOk) failures.push(scannerAdvice(scanner));
-
-  if (failures.length) {
-    console.log("");
-    console.log("Action needed:");
-    for (const failure of failures) console.log(`- ${failure}`);
-    process.exitCode = 1;
+function checkUrl(errors, name, { required = true } = {}) {
+  const raw = value(name);
+  if (!raw) {
+    if (required) errors.push(`Missing ${name}`);
     return;
   }
-
-  console.log("");
-  console.log("LIVE 1.5M CHECK OK");
+  if (!isHttpsUrl(raw)) errors.push(`${name} must be a valid https URL`);
 }
 
-main().catch((error) => {
-  console.error(error.message || error);
-  process.exit(1);
-});
+function checkBoolean(errors, name, expected) {
+  const raw = value(name).toLowerCase();
+  if (raw !== String(expected)) {
+    errors.push(`${name} must be ${expected}`);
+  }
+}
+
+function checkPositiveNumber(errors, name, { min = 0, max = Number.POSITIVE_INFINITY } = {}) {
+  const num = parseNumber(name);
+  if (!Number.isFinite(num)) {
+    errors.push(`${name} must be a number`);
+    return;
+  }
+  if (num < min || num > max) {
+    errors.push(`${name} must be between ${min} and ${max}`);
+  }
+}
+
+function main() {
+  const argMode = String(process.argv[2] || "").trim().toLowerCase();
+  const workerMode = value("WORKER_MODE").toLowerCase();
+  const scannerEnabled = value("PAYMENT_SCANNER_ENABLED").toLowerCase() === "true";
+  const mode = argMode || (workerMode === "scanner" || scannerEnabled ? "scanner" : "api");
+
+  if (!["api", "scanner"].includes(mode)) {
+    throw new Error("Usage: node scripts/verify-env-1_5m.js [api|scanner]");
+  }
+
+  const errors = [];
+  const warnings = [];
+
+  addMissing(errors, [
+    "SUPABASE_URL",
+    "SUPABASE_SERVICE_ROLE_KEY",
+    "ADMIN_TOKEN",
+    "BOT_TOKEN",
+    "TELEGRAM_WEBHOOK_SECRET",
+    "PUBLIC_BACKEND_URL",
+    "PUBLIC_APP_URL",
+    "GAME_URL",
+    "ALLOWED_ORIGINS",
+    "TONAPI_KEY",
+    "TONAPI_BASE_URL"
+  ]);
+
+  checkUrl(errors, "SUPABASE_URL", { required: false });
+  checkUrl(errors, "PUBLIC_BACKEND_URL", { required: false });
+  checkUrl(errors, "PUBLIC_APP_URL", { required: false });
+  checkUrl(errors, "GAME_URL", { required: false });
+  checkUrl(errors, "TONAPI_BASE_URL", { required: false });
+
+  const rateLimitBackend = value("RATE_LIMIT_BACKEND").toLowerCase();
+  if (mode === "api" && rateLimitBackend !== "redis") {
+    errors.push("RATE_LIMIT_BACKEND must be redis for 1.5M API mode");
+  }
+  if (mode === "api" && !value("REDIS_URL")) {
+    errors.push("Missing REDIS_URL");
+  }
+  if (mode === "scanner" && rateLimitBackend !== "redis") {
+    warnings.push("Scanner worker is using memory rate limit fallback; this is OK for scanner-only worker");
+  }
+  if (mode === "scanner" && !value("REDIS_URL")) {
+    warnings.push("REDIS_URL is empty; scanner can still run, but API service should use Redis for 1.5M traffic");
+  }
+
+  checkPositiveNumber(errors, "ACTIVATION_DEPOSIT_TON", { min: 0.000001, max: 1000000 });
+  checkPositiveNumber(errors, "TON_PAYMENT_AMOUNT", { min: 0.000001, max: 1000000 });
+  checkPositiveNumber(errors, "PAYMENT_MIN_RECEIVED_TON", { min: 0.000001, max: 1000000 });
+  checkPositiveNumber(errors, "PAYMENT_MAX_RECEIVED_TON", { min: 0.000001, max: 1000000 });
+  checkPositiveNumber(errors, "WALLET_UNLOCK_REQUIRED_USD", { min: 0, max: 1000000000 });
+  checkPositiveNumber(errors, "SETTINGS_CACHE_TTL_MS", { min: 100, max: 60000 });
+
+  const minTon = parseNumber("PAYMENT_MIN_RECEIVED_TON");
+  const amountTon = parseNumber("TON_PAYMENT_AMOUNT");
+  const maxTon = parseNumber("PAYMENT_MAX_RECEIVED_TON");
+  if (Number.isFinite(minTon) && Number.isFinite(amountTon) && Number.isFinite(maxTon)) {
+    if (minTon > amountTon || amountTon > maxTon) {
+      errors.push("Expected PAYMENT_MIN_RECEIVED_TON <= TON_PAYMENT_AMOUNT <= PAYMENT_MAX_RECEIVED_TON");
+    }
+  }
+
+  if (mode === "api") {
+    checkBoolean(errors, "PAYMENT_SCANNER_ENABLED", false);
+    if (workerMode === "scanner") errors.push("API service must not set WORKER_MODE=scanner");
+    checkPositiveNumber(errors, "PORT", { min: 1, max: 65535 });
+  }
+
+  if (mode === "scanner") {
+    if (workerMode !== "scanner") errors.push("Scanner service must set WORKER_MODE=scanner");
+    checkBoolean(errors, "PAYMENT_SCANNER_ENABLED", true);
+    checkPositiveNumber(errors, "PAYMENT_SCAN_INTERVAL_MS", { min: 5000, max: 300000 });
+    checkPositiveNumber(errors, "PAYMENT_SCAN_BATCH_SIZE", { min: 1, max: 250 });
+  }
+
+  const autoPayoutEnabled = value("TON_AUTO_PAYOUT_ENABLED").toLowerCase() === "true" ||
+    value("TON_SIGNER_ENABLED").toLowerCase() === "true";
+  if (autoPayoutEnabled) {
+    addMissing(errors, ["TON_RPC_ENDPOINT", "TON_SIGNER_KEYS_DIR"]);
+    if (!value("TON_RPC_KEY")) warnings.push("TON_RPC_KEY is empty; this is OK only if your TON RPC endpoint does not require a key");
+  } else {
+    warnings.push("TON auto payout is not enabled; deposit scanning can work, but automatic refund payout will not run");
+  }
+
+  console.log(`VidiPay 1.5M env check mode: ${mode}`);
+  for (const warning of warnings) console.warn(`WARN ${warning}`);
+
+  if (errors.length) {
+    console.error("");
+    console.error("ENV CHECK FAILED");
+    for (const error of errors) console.error(`- ${error}`);
+    process.exit(1);
+  }
+
+  console.log("ENV CHECK OK");
+}
+
+main();
