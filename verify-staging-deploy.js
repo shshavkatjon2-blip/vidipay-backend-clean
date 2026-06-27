@@ -1,99 +1,198 @@
-const fs = require("fs");
-const path = require("path");
+const DEFAULT_TIMEOUT_MS = 12000;
 
-const root = path.resolve(__dirname, "..");
-const expectedVersion = "v1.7.8-1-5m-runtime-capacity-20260627";
-
-function read(relativePath) {
-  return fs.readFileSync(path.join(root, relativePath), "utf8");
+function readEnv(name, fallback = "") {
+  return String(process.env[name] || fallback).trim();
 }
 
-function exists(relativePath) {
-  return fs.existsSync(path.join(root, relativePath));
-}
-
-function fail(errors, message) {
-  errors.push(message);
-}
-
-function assertIncludes(errors, file, pattern, label) {
-  const text = read(file);
-  if (!text.includes(pattern)) fail(errors, `${file} missing ${label || pattern}`);
-}
-
-function walk(dir, files = []) {
-  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-    if (entry.name === "node_modules") continue;
-    const fullPath = path.join(dir, entry.name);
-    if (entry.isDirectory()) walk(fullPath, files);
-    else files.push(fullPath);
+function normalizeBaseUrl(value) {
+  const url = String(value || "").trim().replace(/\/+$/, "");
+  if (!/^https?:\/\//i.test(url)) {
+    throw new Error("BASE_URL must start with http:// or https://");
   }
-  return files;
+  return url;
 }
 
-function main() {
-  const errors = [];
+async function requestJson(baseUrl, item) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), item.timeoutMs || DEFAULT_TIMEOUT_MS);
+  const startedAt = Date.now();
 
-  for (const file of [
-    "server.js",
-    "package.json",
-    "scripts/verify-live-1_5m.js",
-    "scripts/verify-staging-deploy.js",
-    "scripts/verify-env-1_5m.js",
-    "OPS_READINESS_1_5M_2026-06-27.md",
-    "render.yaml",
-    "UPLOAD_TO_RENDER_WEB_SERVICE_ONLY.txt"
-  ]) {
-    if (!exists(file)) fail(errors, `Missing ${file}`);
+  try {
+    const response = await fetch(`${baseUrl}${item.path}`, {
+      method: item.method || "GET",
+      headers: item.headers || {},
+      signal: controller.signal
+    });
+    const text = await response.text();
+    let body = null;
+    try {
+      body = text ? JSON.parse(text) : null;
+    } catch {
+      body = text;
+    }
+
+    let statusOk = response.status >= 200 && response.status < 400;
+    if (Array.isArray(item.expectedStatus)) {
+      statusOk = item.expectedStatus.includes(response.status);
+    } else if (Number.isInteger(item.expectedStatus)) {
+      statusOk = response.status === item.expectedStatus;
+    }
+    const bodyOk = typeof item.bodyOk === "function" ? item.bodyOk(body) : true;
+
+    return {
+      name: item.name,
+      path: item.path,
+      ok: statusOk && bodyOk,
+      status: response.status,
+      ms: Date.now() - startedAt,
+      body,
+      error: statusOk ? (bodyOk ? "" : "unexpected response body") : `unexpected status ${response.status}`
+    };
+  } catch (error) {
+    return {
+      name: item.name,
+      path: item.path,
+      ok: false,
+      status: 0,
+      ms: Date.now() - startedAt,
+      error: error.message
+    };
+  } finally {
+    clearTimeout(timeout);
   }
+}
 
-  assertIncludes(errors, "server.js", expectedVersion, "expected backend version");
-  assertIncludes(errors, "server.js", 'app.get("/ops/readiness"', "/ops/readiness endpoint");
-  assertIncludes(errors, "server.js", 'app.get("/ops/metrics"', "/ops/metrics endpoint");
-  assertIncludes(errors, "server.js", 'app.get("/ops/capacity"', "/ops/capacity endpoint");
-  assertIncludes(errors, "server.js", 'app.get("/ops/deploy"', "/ops/deploy endpoint");
-  assertIncludes(errors, "server.js", 'app.get("/ops/live"', "/ops/live endpoint");
-  assertIncludes(errors, "server.js", "buildProcessMetrics", "process metrics helper");
-  assertIncludes(errors, "server.js", "buildCapacityReadiness", "capacity helper");
-  assertIncludes(errors, "server.js", "shutdownGracefully", "graceful shutdown");
-  assertIncludes(errors, "scripts/verify-live-1_5m.js", expectedVersion, "verify-live expected version");
-  assertIncludes(errors, "package.json", "\"verify:package\"", "package verify script");
-  assertIncludes(errors, "render.yaml", "type: web", "Render Web Service type");
-  assertIncludes(errors, "render.yaml", "startCommand: npm start", "Render Web Service start command");
-  assertIncludes(errors, "render.yaml", "PAYMENT_SCANNER_ENABLED", "scanner disabled env marker");
+function summarizeResult(result) {
+  const status = result.ok ? "OK" : "FAIL";
+  const statusCode = result.status || "ERR";
+  const error = result.error ? ` - ${result.error}` : "";
+  return `${status} ${result.name} ${statusCode} ${result.ms}ms${error}`;
+}
 
-  const textFiles = walk(root)
-    .filter((file) => /\.(js|json|env|txt|md|yaml|yml|sql)$/i.test(file))
-    .filter((file) => fs.statSync(file).size <= 1024 * 1024);
+async function main() {
+  const baseUrl = normalizeBaseUrl(readEnv("BASE_URL"));
+  const testTelegramId = readEnv("TEST_TG_ID");
+  const adminToken = readEnv("ADMIN_TOKEN");
+  const expectedVersion = readEnv("EXPECTED_VERSION");
 
-  const forbiddenPatterns = [
-    { regex: /v1\.7\.5-1-5m-worker-failfast-20260627/, label: "old backend version" },
-    { regex: /v1\.7\.6-1-5m-readiness-doctor-20260627/, label: "old backend version" },
-    { regex: /v1\.7\.7-1-5m-ops-observability-20260627/, label: "old backend version" },
-    { regex: /UPLOAD_READY_SCANNER_WORKER_ONLY_1_5M_2026-06-27\.zip/, label: "old non-safe scanner zip name" },
-    { regex: /UPLOAD_READY_1_5M_BACKEND_STAGING_2026-06-26\.zip/, label: "old non-safe backend zip name" },
-    { regex: /ACTIVATION_FEE_TON=0(?:\r?\n|$)/, label: "old activation fee value" },
-    { regex: /READY_FILLED_1_5M/, label: "confusing filled env name" }
+  const checks = [
+    {
+      name: "healthz",
+      path: "/healthz",
+      bodyOk: body => body && body.status === "ok" && (!expectedVersion || body.version === expectedVersion)
+    },
+    {
+      name: "readyz",
+      path: "/readyz",
+      bodyOk: body => body && body.status === "ready" && (!expectedVersion || body.version === expectedVersion)
+    },
+    {
+      name: "root",
+      path: "/",
+      bodyOk: body => body && body.status === "online" && (!expectedVersion || body.version === expectedVersion)
+    },
+    {
+      name: "scanner public health",
+      path: "/scanner/healthz",
+      bodyOk: body => body && ["ok", "stale", "unavailable"].includes(body.status)
+    },
+    {
+      name: "ops readiness",
+      path: "/ops/readiness",
+      bodyOk: body => body && ["ready", "action_required", "not_ready"].includes(body.status)
+    },
+    {
+      name: "ops metrics",
+      path: "/ops/metrics",
+      bodyOk: body => body && typeof body.uptime_seconds === "number"
+    },
+    {
+      name: "ops capacity",
+      path: "/ops/capacity",
+      bodyOk: body => body && body.capacity && ["ready", "warning", "blocked"].includes(body.capacity.status)
+    },
+    {
+      name: "ops deploy",
+      path: "/ops/deploy",
+      bodyOk: body => body && ["ready", "action_required", "not_ready"].includes(body.status)
+    },
+    {
+      name: "ops live",
+      path: "/ops/live",
+      bodyOk: body => body && ["ready", "action_required", "not_ready"].includes(body.status)
+    },
+    {
+      name: "settings",
+      path: "/settings",
+      bodyOk: body => body
+        && Number(body.activation_deposit_amount) > 0
+        && Number(body.payment_min_received_amount) > 0
+        && Number(body.payment_max_received_amount) >= Number(body.payment_min_received_amount)
+    },
+    {
+      name: "admin protected without token",
+      path: "/admin/users?limit=1&page=1",
+      expectedStatus: [401, 403]
+    }
   ];
 
-  for (const file of textFiles) {
-    const relative = path.relative(root, file);
-    if (relative === path.join("scripts", "verify-package-1_5m.js")) continue;
-    const text = fs.readFileSync(file, "utf8");
-    for (const item of forbiddenPatterns) {
-      if (item.regex.test(text)) fail(errors, `${relative} contains ${item.label}`);
+  if (testTelegramId) {
+    checks.push({
+      name: "payment status",
+      path: `/payment/status/${encodeURIComponent(testTelegramId)}`
+    });
+    checks.push({
+      name: "notifications",
+      path: `/notifications/${encodeURIComponent(testTelegramId)}`
+    });
+    checks.push({
+      name: "history",
+      path: `/history/${encodeURIComponent(testTelegramId)}`
+    });
+  }
+
+  if (adminToken) {
+    const headers = { "X-Admin-Token": adminToken };
+    checks.push(
+      { name: "admin users", path: "/admin/users?limit=20&page=1", headers },
+      { name: "admin withdraws", path: "/admin/withdraws?status=pending&limit=20&page=1", headers },
+      { name: "admin payment orders", path: "/admin/payment-orders?status=pending&limit=20&page=1", headers },
+      { name: "admin payment wallets", path: "/admin/payment-wallets", headers },
+      {
+        name: "admin payment scanner",
+        path: "/admin/payment-scanner/status",
+        headers,
+        bodyOk: body => body && typeof body.heartbeat_available === "boolean"
+      }
+    );
+  }
+
+  const results = [];
+  for (const check of checks) {
+    const result = await requestJson(baseUrl, check);
+    results.push(result);
+    console.log(summarizeResult(result));
+  }
+
+  const failed = results.filter((item) => !item.ok);
+  const slow = results.filter((item) => item.ms > 1500);
+
+  console.log("");
+  console.log(`Checked: ${results.length}`);
+  console.log(`Failed: ${failed.length}`);
+  console.log(`Slow over 1500ms: ${slow.length}`);
+
+  if (failed.length) {
+    process.exitCode = 1;
+    console.log("");
+    console.log("Failed checks:");
+    for (const item of failed) {
+      console.log(`- ${item.name}: ${item.error || "failed"}`);
     }
   }
-
-  if (errors.length) {
-    console.error("PACKAGE CHECK FAILED");
-    for (const error of errors) console.error(`- ${error}`);
-    process.exit(1);
-  }
-
-  console.log("PACKAGE CHECK OK");
-  console.log(`version=${expectedVersion}`);
-  console.log(`files_checked=${textFiles.length}`);
 }
 
-main();
+main().catch((error) => {
+  console.error(error.message || error);
+  process.exit(1);
+});

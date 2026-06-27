@@ -3,7 +3,7 @@ services:
     name: vidipay-backend
     runtime: node
     plan: standard
-    buildCommand: node render-build-fix.cjs && npm ci --omit=dev
+    buildCommand: node render-build-fix.cjs && npm install --omit=dev
     startCommand: npm start
     healthCheckPath: /healthz
     envVars:
