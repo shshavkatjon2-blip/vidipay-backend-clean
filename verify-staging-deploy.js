@@ -1,99 +1,198 @@
-const fs = require("fs");
-const path = require("path");
+const DEFAULT_TIMEOUT_MS = 12000;
 
-const root = path.resolve(__dirname, "..");
-const candidateDirs = [
-  path.join(root, "sql"),
-  path.join(root, "..", "sql")
-];
-const sqlDir = candidateDirs.find((dir) => fs.existsSync(dir));
-
-function read(file) {
-  return fs.readFileSync(path.join(sqlDir, file), "utf8");
+function readEnv(name, fallback = "") {
+  return String(process.env[name] || fallback).trim();
 }
 
-function fail(errors, message) {
-  errors.push(message);
+function normalizeBaseUrl(value) {
+  const url = String(value || "").trim().replace(/\/+$/, "");
+  if (!/^https?:\/\//i.test(url)) {
+    throw new Error("BASE_URL must start with http:// or https://");
+  }
+  return url;
 }
 
-function assertFile(errors, file) {
-  if (!fs.existsSync(path.join(sqlDir, file))) fail(errors, `Missing sql/${file}`);
+async function requestJson(baseUrl, item) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), item.timeoutMs || DEFAULT_TIMEOUT_MS);
+  const startedAt = Date.now();
+
+  try {
+    const response = await fetch(`${baseUrl}${item.path}`, {
+      method: item.method || "GET",
+      headers: item.headers || {},
+      signal: controller.signal
+    });
+    const text = await response.text();
+    let body = null;
+    try {
+      body = text ? JSON.parse(text) : null;
+    } catch {
+      body = text;
+    }
+
+    let statusOk = response.status >= 200 && response.status < 400;
+    if (Array.isArray(item.expectedStatus)) {
+      statusOk = item.expectedStatus.includes(response.status);
+    } else if (Number.isInteger(item.expectedStatus)) {
+      statusOk = response.status === item.expectedStatus;
+    }
+    const bodyOk = typeof item.bodyOk === "function" ? item.bodyOk(body) : true;
+
+    return {
+      name: item.name,
+      path: item.path,
+      ok: statusOk && bodyOk,
+      status: response.status,
+      ms: Date.now() - startedAt,
+      body,
+      error: statusOk ? (bodyOk ? "" : "unexpected response body") : `unexpected status ${response.status}`
+    };
+  } catch (error) {
+    return {
+      name: item.name,
+      path: item.path,
+      ok: false,
+      status: 0,
+      ms: Date.now() - startedAt,
+      error: error.message
+    };
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
-function assertIncludes(errors, file, pattern, label) {
-  const text = read(file);
-  if (!text.includes(pattern)) fail(errors, `${file} missing ${label || pattern}`);
+function summarizeResult(result) {
+  const status = result.ok ? "OK" : "FAIL";
+  const statusCode = result.status || "ERR";
+  const error = result.error ? ` - ${result.error}` : "";
+  return `${status} ${result.name} ${statusCode} ${result.ms}ms${error}`;
 }
 
-function main() {
-  if (!sqlDir) {
-    console.log("SQL PACKAGE CHECK SKIPPED");
-    console.log("reason=sql directory is not bundled with this repo-only upload");
-    return;
+async function main() {
+  const baseUrl = normalizeBaseUrl(readEnv("BASE_URL"));
+  const testTelegramId = readEnv("TEST_TG_ID");
+  const adminToken = readEnv("ADMIN_TOKEN");
+  const expectedVersion = readEnv("EXPECTED_VERSION");
+
+  const checks = [
+    {
+      name: "healthz",
+      path: "/healthz",
+      bodyOk: body => body && body.status === "ok" && (!expectedVersion || body.version === expectedVersion)
+    },
+    {
+      name: "readyz",
+      path: "/readyz",
+      bodyOk: body => body && body.status === "ready" && (!expectedVersion || body.version === expectedVersion)
+    },
+    {
+      name: "root",
+      path: "/",
+      bodyOk: body => body && body.status === "online" && (!expectedVersion || body.version === expectedVersion)
+    },
+    {
+      name: "scanner public health",
+      path: "/scanner/healthz",
+      bodyOk: body => body && ["ok", "stale", "unavailable"].includes(body.status)
+    },
+    {
+      name: "ops readiness",
+      path: "/ops/readiness",
+      bodyOk: body => body && ["ready", "action_required", "not_ready"].includes(body.status)
+    },
+    {
+      name: "ops metrics",
+      path: "/ops/metrics",
+      bodyOk: body => body && typeof body.uptime_seconds === "number"
+    },
+    {
+      name: "ops capacity",
+      path: "/ops/capacity",
+      bodyOk: body => body && body.capacity && ["ready", "warning", "blocked"].includes(body.capacity.status)
+    },
+    {
+      name: "ops deploy",
+      path: "/ops/deploy",
+      bodyOk: body => body && ["ready", "action_required", "not_ready"].includes(body.status)
+    },
+    {
+      name: "ops live",
+      path: "/ops/live",
+      bodyOk: body => body && ["ready", "action_required", "not_ready"].includes(body.status)
+    },
+    {
+      name: "settings",
+      path: "/settings",
+      bodyOk: body => body
+        && Number(body.activation_deposit_amount) > 0
+        && Number(body.payment_min_received_amount) > 0
+        && Number(body.payment_max_received_amount) >= Number(body.payment_min_received_amount)
+    },
+    {
+      name: "admin protected without token",
+      path: "/admin/users?limit=1&page=1",
+      expectedStatus: [401, 403]
+    }
+  ];
+
+  if (testTelegramId) {
+    checks.push({
+      name: "payment status",
+      path: `/payment/status/${encodeURIComponent(testTelegramId)}`
+    });
+    checks.push({
+      name: "notifications",
+      path: `/notifications/${encodeURIComponent(testTelegramId)}`
+    });
+    checks.push({
+      name: "history",
+      path: `/history/${encodeURIComponent(testTelegramId)}`
+    });
   }
 
-  const errors = [];
-  for (const file of [
-    "RUN_HYPERSCALE_SQL_2026-06-27.sql",
-    "VERIFY_HYPERSCALE_SQL_2026-06-27.sql",
-    "POST_DEPLOY_VERIFY_1_5M.sql",
-    "SCALE_CONTRACT_AUDIT_1_5M.sql",
-    "WALLET_CAPACITY_AUDIT_1_5M.sql",
-    "PAYMENT_ORDER_SCANNER_AUDIT_1_5M.sql",
-    "PAYMENT_BACKLOG_FAST_AUDIT_1_5M.sql",
-    "SCANNER_HEARTBEAT_AUDIT_1_5M.sql",
-    "SCANNER_SHARD_COVERAGE_AUDIT_1_5M.sql",
-    "FINAL_REMAINING_BLOCKERS_AUDIT_1_5M.sql",
-    "FINAL_GATE_SQL_VERIFY_1_5M.sql",
-    "IMPORT_PROGRESS_TABLE_1_5M.sql",
-    "FINAL_OPERATIONAL_GATE_1_5M.sql",
-    "WALLET_IMPORT_MANIFEST_AUDIT_1_5M.sql",
-    "SCANNER_WORKER_OPERATIONS_AUDIT_1_5M.sql",
-    "CONTROL_TOWER_SQL_AUDIT_1_5M.sql",
-    "WALLET_ASSIGNMENT_INTEGRITY_AUDIT_1_5M.sql",
-    "PAYMENT_ORDER_TO_WALLET_LINK_AUDIT_1_5M.sql",
-    "TON_DEPOSIT_REFUND_AUDIT_1_5M.sql",
-    "CLOSEOUT_FINAL_SQL_AUDIT_1_5M.sql",
-    "INFRA_AUTOPILOT_SQL_GATE_1_5M.sql",
-    "WALLET_PUBLIC_IMPORT_STAGING_TEMPLATE_1_5M.sql",
-    "COPY_THIS_FIRST_FIX_SHARD_COLUMNS_1_5M.sql",
-    "RUN_SQL_IN_THIS_ORDER_1_5M.txt"
-  ]) {
-    assertFile(errors, file);
+  if (adminToken) {
+    const headers = { "X-Admin-Token": adminToken };
+    checks.push(
+      { name: "admin users", path: "/admin/users?limit=20&page=1", headers },
+      { name: "admin withdraws", path: "/admin/withdraws?status=pending&limit=20&page=1", headers },
+      { name: "admin payment orders", path: "/admin/payment-orders?status=pending&limit=20&page=1", headers },
+      { name: "admin payment wallets", path: "/admin/payment-wallets", headers },
+      {
+        name: "admin payment scanner",
+        path: "/admin/payment-scanner/status",
+        headers,
+        bodyOk: body => body && typeof body.heartbeat_available === "boolean"
+      }
+    );
   }
 
-  if (!errors.length) {
-    assertIncludes(errors, "RUN_HYPERSCALE_SQL_2026-06-27.sql", "claim_pending_payment_orders_sharded", "sharded scanner claim function");
-    assertIncludes(errors, "RUN_HYPERSCALE_SQL_2026-06-27.sql", "payment_scanner_heartbeats", "scanner heartbeat table");
-    assertIncludes(errors, "VERIFY_HYPERSCALE_SQL_2026-06-27.sql", "function_claim_pending_payment_orders_sharded", "sharded claim verify");
-    assertIncludes(errors, "SCALE_CONTRACT_AUDIT_1_5M.sql", "wallet_capacity_available_1_5m", "wallet capacity contract");
-    assertIncludes(errors, "SCANNER_SHARD_COVERAGE_AUDIT_1_5M.sql", "scanner_shard_coverage_live", "scanner shard coverage");
-    assertIncludes(errors, "PAYMENT_BACKLOG_FAST_AUDIT_1_5M.sql", "pending_orders_with_wallet", "payment backlog audit");
-    assertIncludes(errors, "FINAL_GATE_SQL_VERIFY_1_5M.sql", "wallet_capacity_ready", "final SQL launch gate");
-    assertIncludes(errors, "IMPORT_PROGRESS_TABLE_1_5M.sql", "wallet_import_batches", "wallet import progress table");
-    assertIncludes(errors, "FINAL_OPERATIONAL_GATE_1_5M.sql", "vidipay_operational_gate_1_5m", "final operational gate");
-    assertIncludes(errors, "WALLET_IMPORT_MANIFEST_AUDIT_1_5M.sql", "wallet_import_batches_summary", "wallet import manifest audit");
-    assertIncludes(errors, "SCANNER_WORKER_OPERATIONS_AUDIT_1_5M.sql", "scanner_live_summary", "scanner worker operations audit");
-    assertIncludes(errors, "CONTROL_TOWER_SQL_AUDIT_1_5M.sql", "wallet_capacity_ready", "control tower SQL audit");
-    assertIncludes(errors, "WALLET_ASSIGNMENT_INTEGRITY_AUDIT_1_5M.sql", "multi_wallet_users", "wallet assignment integrity audit");
-    assertIncludes(errors, "PAYMENT_ORDER_TO_WALLET_LINK_AUDIT_1_5M.sql", "pending_order_wallet_status", "payment order wallet link audit");
-    assertIncludes(errors, "TON_DEPOSIT_REFUND_AUDIT_1_5M.sql", "vidipay_ton_refund_audit_1_5m", "TON deposit refund audit");
-    assertIncludes(errors, "CLOSEOUT_FINAL_SQL_AUDIT_1_5M.sql", "wallet_capacity_ready", "closeout final SQL audit");
-    assertIncludes(errors, "INFRA_AUTOPILOT_SQL_GATE_1_5M.sql", "vidipay_infra_autopilot_gate_1_5m", "infra autopilot SQL gate");
-    assertIncludes(errors, "WALLET_PUBLIC_IMPORT_STAGING_TEMPLATE_1_5M.sql", "wallet_import_batches", "public wallet import staging table");
-    assertIncludes(errors, "COPY_THIS_FIRST_FIX_SHARD_COLUMNS_1_5M.sql", "shard_index", "emergency shard column fix");
-    assertIncludes(errors, "RUN_SQL_IN_THIS_ORDER_1_5M.txt", "POST_DEPLOY_VERIFY_1_5M.sql", "post deploy verify order");
-    assertIncludes(errors, "RUN_SQL_IN_THIS_ORDER_1_5M.txt", "SCALE_CONTRACT_AUDIT_1_5M.sql", "scale contract run order");
+  const results = [];
+  for (const check of checks) {
+    const result = await requestJson(baseUrl, check);
+    results.push(result);
+    console.log(summarizeResult(result));
   }
 
-  if (errors.length) {
-    console.error("SQL PACKAGE CHECK FAILED");
-    for (const error of errors) console.error(`- ${error}`);
-    process.exit(1);
-  }
+  const failed = results.filter((item) => !item.ok);
+  const slow = results.filter((item) => item.ms > 1500);
 
-  console.log("SQL PACKAGE CHECK OK");
-  console.log(`sql_dir=${sqlDir}`);
+  console.log("");
+  console.log(`Checked: ${results.length}`);
+  console.log(`Failed: ${failed.length}`);
+  console.log(`Slow over 1500ms: ${slow.length}`);
+
+  if (failed.length) {
+    process.exitCode = 1;
+    console.log("");
+    console.log("Failed checks:");
+    for (const item of failed) {
+      console.log(`- ${item.name}: ${item.error || "failed"}`);
+    }
+  }
 }
 
-main();
+main().catch((error) => {
+  console.error(error.message || error);
+  process.exit(1);
+});

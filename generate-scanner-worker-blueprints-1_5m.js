@@ -3,51 +3,85 @@ const path = require("path");
 
 const root = path.resolve(__dirname, "..");
 const packageRoot = path.resolve(root, "..");
-const outputDir = fs.existsSync(path.join(packageRoot, "ops")) ? path.join(packageRoot, "ops") : root;
-const outputFile = path.join(outputDir, "scanner-shard-env-matrix-1_5m.txt");
-const shardCounts = [4, 16, 64, 256];
+const outDir = path.join(packageRoot, "render-blueprints");
+const envDir = path.join(packageRoot, "env", "scanner-workers");
 
-function block(count, index) {
+function write(file, text) {
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, text.endsWith("\n") ? text : `${text}\n`, "utf8");
+  console.log(path.relative(packageRoot, file).replace(/\\/g, "/"));
+}
+
+function workerService(index, shardCount) {
+  const suffix = String(index).padStart(3, "0");
+  return `  - type: worker
+    name: vidipay-scanner-${suffix}
+    runtime: node
+    plan: pro
+    buildCommand: node render-build-fix.cjs && npm install --omit=dev --no-audit --no-fund
+    startCommand: npm run start:scanner
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: WORKER_MODE
+        value: scanner
+      - key: PAYMENT_SCANNER_ENABLED
+        value: true
+      - key: PAYMENT_SCANNER_WORKER_ID
+        value: vidipay-scanner-${suffix}
+      - key: PAYMENT_SCANNER_SHARD_COUNT
+        value: ${shardCount}
+      - key: PAYMENT_SCANNER_SHARD_INDEX
+        value: ${index}
+      - key: REDIS_SCANNER_LOCKS_ENABLED
+        value: true
+      - key: REDIS_URL
+        sync: false
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      - key: TONAPI_KEY
+        sync: false
+      - key: TONAPI_BASE_URL
+        value: https://tonapi.io
+`;
+}
+
+function envFile(index, shardCount) {
+  const suffix = String(index).padStart(3, "0");
   return [
-    `# scanner shard ${index + 1}/${count}`,
+    "NODE_ENV=production",
     "WORKER_MODE=scanner",
     "PAYMENT_SCANNER_ENABLED=true",
-    `PAYMENT_SCANNER_WORKER_ID=scanner-${count}-${index}`,
-    `PAYMENT_SCANNER_SHARD_COUNT=${count}`,
+    `PAYMENT_SCANNER_WORKER_ID=vidipay-scanner-${suffix}`,
+    `PAYMENT_SCANNER_SHARD_COUNT=${shardCount}`,
     `PAYMENT_SCANNER_SHARD_INDEX=${index}`,
     "PAYMENT_SCAN_INTERVAL_MS=3000",
     "PAYMENT_SCAN_BATCH_SIZE=500",
     "PAYMENT_SCAN_CONCURRENCY=32",
     "PAYMENT_SCAN_JITTER_MS=2500",
     "PAYMENT_SCAN_ORDER_DELAY_MS=10",
-    "PAYMENT_SCAN_MAX_ERRORS_PER_RUN=500",
     "REDIS_SCANNER_LOCKS_ENABLED=true",
-    "REDIS_SCANNER_LOCKS_REQUIRED=false",
-    "REDIS_SCANNER_LOCK_TTL_MS=60000",
-    "TONAPI_BASE_URL=https://tonapi.io",
+    "REDIS_URL=",
     "SUPABASE_URL=",
     "SUPABASE_SERVICE_ROLE_KEY=",
     "TONAPI_KEY=",
-    ""
+    "TONAPI_BASE_URL=https://tonapi.io"
   ].join("\n");
 }
 
-function main() {
-  const lines = [
-    "# VidiPay 1.5M scanner shard env matrix",
-    "# Use 4 for minimum gate, 16 for 1.5M baseline, 64/256 for later expansion.",
-    ""
-  ];
-  for (const count of shardCounts) {
-    lines.push(`# ===== ${count} scanner workers =====`);
-    for (let index = 0; index < count; index += 1) {
-      lines.push(block(count, index));
-    }
+function generate(shardCount) {
+  const services = ["services:"];
+  for (let index = 0; index < shardCount; index += 1) {
+    services.push(workerService(index, shardCount));
+    write(path.join(envDir, `${shardCount}-workers`, `scanner-${String(index).padStart(3, "0")}.env`), envFile(index, shardCount));
   }
-  fs.mkdirSync(outputDir, { recursive: true });
-  fs.writeFileSync(outputFile, `${lines.join("\n")}\n`, "utf8");
-  console.log(`scanner_matrix=${outputFile}`);
-  console.log(`shard_counts=${shardCounts.join(",")}`);
+  write(path.join(outDir, `scanner-workers-${shardCount}.autopilot.yaml`), services.join("\n"));
+}
+
+function main() {
+  for (const shardCount of [4, 16, 64]) generate(shardCount);
 }
 
 main();

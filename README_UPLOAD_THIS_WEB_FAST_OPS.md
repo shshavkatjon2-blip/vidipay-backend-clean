@@ -1,26 +1,38 @@
-{
-  "generated_at": "2026-06-27T19:13:34.789Z",
-  "version": "v1.8.2-infra-autopilot-20260628",
-  "target_users": 1500000,
-  "required_live_endpoints": [
-    "/healthz",
-    "/ops/redis",
-    "/scanner/healthz",
-    "/ops/wallet-capacity",
-    "/ops/ton-signer",
-    "/ops/final-gate"
-  ],
-  "ready_criteria": {
-    "redis_ok": true,
-    "scanner_workers_alive_minimum": 4,
-    "wallet_capacity_gap_minimum": 0,
-    "ton_signer_ok": true,
-    "final_gate_ready_for_1_5m_public_traffic": true
-  },
-  "upload_packages": {
-    "web_service": "UPLOAD_WEB_SERVICE_1_5M_PRODUCTION_LAUNCH_BUNDLE_2026-06-27.zip",
-    "scanner_workers": "UPLOAD_SCANNER_WORKERS_1_5M_PRODUCTION_LAUNCH_BUNDLE_2026-06-27.zip",
-    "full_bundle": "UPLOAD_1_5M_PRODUCTION_LAUNCH_BUNDLE_2026-06-27.zip"
-  },
-  "private_key_policy": "Never upload private-keys to GitHub, Render, Supabase, or frontend hosting."
-}
+# Upload This To `vidipay-backend`
+
+Purpose: 1.5M backend ops speed patch only.
+
+Changed:
+
+- Cached scanner heartbeat reads for fast `/scanner/healthz`.
+- Cached wallet capacity counts for fast `/ops/wallet-capacity`.
+- Cached scanner backlog counts.
+- Cached Redis health/deep checks.
+- Reused one ops snapshot for `/ops/final-gate`, `/ops/scale-contract`, and `/ops/launch-checklist`.
+
+Render settings:
+
+```text
+Build Command: npm install --omit=dev
+Start Command: npm start
+Root Directory: empty
+```
+
+Recommended env additions/updates:
+
+```env
+SCANNER_HEARTBEAT_CACHE_TTL_MS=1500
+WALLET_CAPACITY_CACHE_TTL_MS=15000
+SCANNER_BACKLOG_CACHE_TTL_MS=10000
+REDIS_HEALTH_CACHE_TTL_MS=5000
+OPS_SNAPSHOT_CACHE_TTL_MS=3000
+OPS_DB_AUDIT_TIMEOUT_MS=5000
+SCALE_AUDIT_COUNT_MODE=planned
+```
+
+Do not put scanner mode on the web service:
+
+```env
+WORKER_MODE=api
+PAYMENT_SCANNER_ENABLED=false
+```

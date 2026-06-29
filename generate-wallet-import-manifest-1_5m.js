@@ -1,177 +1,64 @@
 const fs = require("fs");
 const path = require("path");
 const crypto = require("crypto");
-const { WalletContractV4 } = require("@ton/ton");
-const { mnemonicNew, mnemonicToPrivateKey, keyPairFromSeed } = require("@ton/crypto");
 
-function readArg(name, fallback = "") {
-  const prefix = `--${name}=`;
-  const direct = process.argv.find((item) => item.startsWith(prefix));
-  if (direct) return direct.slice(prefix.length);
+const root = path.resolve(__dirname, "..");
+const packageRoot = path.resolve(root, "..");
+const searchDir = path.resolve(process.argv[2] || path.join(packageRoot, "wallet-import"));
+const outputDir = fs.existsSync(path.join(packageRoot, "ops")) ? path.join(packageRoot, "ops") : root;
+const outputFile = path.join(outputDir, "wallet-import-manifest-1_5m.json");
 
-  const index = process.argv.indexOf(`--${name}`);
-  if (index >= 0 && process.argv[index + 1]) return process.argv[index + 1];
-  return fallback;
+function walk(dir, files = []) {
+  if (!fs.existsSync(dir)) return files;
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    const full = path.join(dir, entry.name);
+    if (entry.isDirectory()) walk(full, files);
+    else files.push(full);
+  }
+  return files;
 }
 
-function normalizeCount(value) {
-  const parsed = Number(value);
-  if (!Number.isFinite(parsed) || parsed < 1) return 10;
-  return Math.min(100000, Math.floor(parsed));
+function countWalletRows(text) {
+  const matches = text.match(/\b(EQ|UQ)[A-Za-z0-9_-]{30,}\b/g);
+  return matches ? matches.length : 0;
 }
 
-function normalizeBatchSize(value) {
-  const parsed = Number(value);
-  if (!Number.isFinite(parsed) || parsed < 1) return 5000;
-  return Math.min(10000, Math.floor(parsed));
+function sha256(file) {
+  return crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex");
 }
 
-function sanitizeLabel(index, width) {
-  return `wallet-${String(index + 1).padStart(width, "0")}`;
-}
+function main() {
+  const files = walk(searchDir)
+    .filter((file) => /public-addresses.*\.(sql|csv|txt)$/i.test(path.basename(file)))
+    .sort((a, b) => a.localeCompare(b));
 
-function buildInsertSql(rows) {
-  return [
-    "insert into payment_wallets (network, token, address) values",
-    `${rows.join(",\n")}`,
-    "on conflict (address) do nothing;"
-  ].join("\n");
-}
-
-async function main() {
-  const count = normalizeCount(readArg("count", "10"));
-  const sqlBatchSize = normalizeBatchSize(readArg("sql-batch-size", "5000"));
-  const keyFormat = String(readArg("key-format", "mnemonic")).trim().toLowerCase() === "seed" ? "seed" : "mnemonic";
-  const workchain = Number(readArg("workchain", "0")) || 0;
-  const network = String(readArg("network", "mainnet")).trim().toLowerCase() === "testnet" ? "testnet" : "mainnet";
-  const outDir = path.resolve(readArg("out", path.join(process.cwd(), "ton-wallet-pool")));
-  const labelWidth = Math.max(6, String(count).length);
-
-  fs.mkdirSync(outDir, { recursive: true });
-
-  const publicRows = [];
-  let batchRows = [];
-  let batchNumber = 1;
-  let writtenBatchCount = 0;
-  const csvRows = [["label", "address", "raw_address", "network", "workchain"]];
-  const manifest = [];
-
-  for (let index = 0; index < count; index += 1) {
-    const label = sanitizeLabel(index, labelWidth);
-    let mnemonic = null;
-    let seedHex = "";
-    let keyPair = null;
-
-    if (keyFormat === "seed") {
-      const seed = crypto.randomBytes(32);
-      seedHex = seed.toString("hex");
-      keyPair = keyPairFromSeed(seed);
-    } else {
-      mnemonic = await mnemonicNew(24);
-      keyPair = await mnemonicToPrivateKey(mnemonic);
-    }
-
-    const wallet = WalletContractV4.create({
-      workchain,
-      publicKey: keyPair.publicKey
-    });
-
-    const address = wallet.address.toString({
-      urlSafe: true,
-      bounceable: true,
-      testOnly: network === "testnet"
-    });
-    const rawAddress = wallet.address.toRawString();
-    const walletFilePath = path.join(outDir, `${label}.json`);
-
-    const securePayload = {
-      label,
-      network,
-      workchain,
-      address,
-      raw_address: rawAddress,
-      key_format: keyFormat,
-      ...(mnemonic ? { mnemonic: mnemonic.join(" ") } : {}),
-      ...(seedHex ? { seed_hex: seedHex } : {}),
-      public_key_hex: Buffer.from(keyPair.publicKey).toString("hex")
+  const batches = files.map((file, index) => {
+    const text = fs.readFileSync(file, "utf8");
+    return {
+      batch_index: index,
+      file: path.relative(packageRoot, file).replace(/\\/g, "/"),
+      bytes: fs.statSync(file).size,
+      wallet_rows_detected: countWalletRows(text),
+      sha256: sha256(file)
     };
+  });
 
-    fs.writeFileSync(walletFilePath, JSON.stringify(securePayload, null, 2), "utf8");
+  const manifest = {
+    generated_at: new Date().toISOString(),
+    search_dir: searchDir,
+    target_users: 1500000,
+    batch_count: batches.length,
+    wallet_rows_detected: batches.reduce((sum, item) => sum + item.wallet_rows_detected, 0),
+    ready_for_sql_import: batches.length > 0,
+    note: batches.length ? "Import these batches in Supabase SQL editor, then run WALLET_IMPORT_MANIFEST_AUDIT_1_5M.sql." : "No public-addresses SQL/CSV/TXT files found yet.",
+    batches
+  };
 
-    const publicRow = `('TON', 'TON', '${address}')`;
-    publicRows.push(publicRow);
-    batchRows.push(publicRow);
-    csvRows.push([label, address, rawAddress, network, String(workchain)]);
-    manifest.push({
-      label,
-      address,
-      raw_address: rawAddress,
-      wallet_file: `${label}.json`
-    });
-
-    if (batchRows.length >= sqlBatchSize) {
-      const batchFile = path.join(outDir, `public-addresses-${String(batchNumber).padStart(3, "0")}.sql`);
-      fs.writeFileSync(batchFile, buildInsertSql(batchRows), "utf8");
-      batchRows = [];
-      batchNumber += 1;
-      writtenBatchCount += 1;
-    }
-
-    if ((index + 1) % 10000 === 0) {
-      console.log(`Generated ${index + 1}/${count} wallets...`);
-    }
-  }
-
-  if (batchRows.length) {
-    const batchFile = path.join(outDir, `public-addresses-${String(batchNumber).padStart(3, "0")}.sql`);
-    fs.writeFileSync(batchFile, buildInsertSql(batchRows), "utf8");
-    writtenBatchCount += 1;
-  }
-
-  const sql = buildInsertSql(publicRows);
-
-  const csv = csvRows
-    .map((row) => row.map((item) => `"${String(item).replace(/"/g, "\"\"")}"`).join(","))
-    .join("\n");
-
-  const envSnippet = [
-    "TON_SIGNER_ENABLED=true",
-    `TON_SIGNER_NETWORK=${network}`,
-    `TON_SIGNER_KEYS_DIR=${outDir}`,
-    "TON_RPC_ENDPOINT=",
-    "TON_RPC_API_KEY=",
-    "TON_PAYOUT_GAS_RESERVE=0.10",
-    "TON_PAYOUT_BODY=VidiPay activation payout"
-  ].join("\n");
-
-  const readme = [
-    "VidiPay TON wallet pool",
-    "",
-    `Wallet count: ${count}`,
-    `Network: ${network}`,
-    `Workchain: ${workchain}`,
-    `Key format: ${keyFormat}`,
-    "",
-    "Important:",
-    "- Do not upload these JSON files to GitHub, Supabase, Render, or frontend hosting.",
-    "- Keep this folder private. Each JSON file contains the private recovery material for one pool wallet.",
-    "- Use public-addresses.sql to import only the friendly addresses into payment_wallets.",
-    `- For large imports, run public-addresses-001.sql ... public-addresses-${String(writtenBatchCount).padStart(3, "0")}.sql in Supabase SQL editor.`,
-    "- signer-env-snippet.txt is for local signer setup only."
-  ].join("\n");
-
-  fs.writeFileSync(path.join(outDir, "public-addresses.sql"), sql, "utf8");
-  fs.writeFileSync(path.join(outDir, "wallets-summary.csv"), csv, "utf8");
-  fs.writeFileSync(path.join(outDir, "wallet-manifest.public.json"), JSON.stringify(manifest, null, 2), "utf8");
-  fs.writeFileSync(path.join(outDir, "signer-env-snippet.txt"), envSnippet, "utf8");
-  fs.writeFileSync(path.join(outDir, "README.txt"), readme, "utf8");
-
-  console.log(`Generated ${count} TON wallets.`);
-  console.log(`Secure folder: ${outDir}`);
-  console.log(`Public SQL: ${path.join(outDir, "public-addresses.sql")}`);
+  fs.mkdirSync(outputDir, { recursive: true });
+  fs.writeFileSync(outputFile, `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
+  console.log(`manifest=${outputFile}`);
+  console.log(`batches=${manifest.batch_count}`);
+  console.log(`wallet_rows_detected=${manifest.wallet_rows_detected}`);
 }
 
-main().catch((error) => {
-  console.error(error.message || error);
-  process.exit(1);
-});
+main();

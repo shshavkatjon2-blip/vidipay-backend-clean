@@ -1,130 +1,99 @@
 const fs = require("fs");
 const path = require("path");
-const crypto = require("crypto");
+const http = require("http");
+const https = require("https");
+const { spawnSync } = require("child_process");
 
-function arg(name, fallback = "") {
-  const prefix = `--${name}=`;
-  const direct = process.argv.find((item) => item.startsWith(prefix));
-  if (direct) return direct.slice(prefix.length);
-  const index = process.argv.indexOf(`--${name}`);
-  if (index >= 0 && process.argv[index + 1]) return process.argv[index + 1];
-  return fallback;
-}
+const baseUrl = String(process.argv[2] || process.env.PUBLIC_BACKEND_URL || "https://vidipay-backend.onrender.com").replace(/\/$/, "");
+const timeoutMs = Math.max(3000, Number(process.env.LIVE_VERIFY_TIMEOUT_MS || 25000));
+const root = path.resolve(__dirname, "..");
+const packageRoot = path.resolve(root, "..");
+const outputDir = fs.existsSync(path.join(packageRoot, "ops")) ? path.join(packageRoot, "ops") : root;
+const outputFile = path.join(outputDir, "live-control-tower-diagnosis-1_5m.json");
 
-function numberArg(name, fallback, min, max) {
-  const parsed = Number(arg(name, fallback));
-  if (!Number.isFinite(parsed)) return fallback;
-  return Math.max(min, Math.min(max, Math.floor(parsed)));
-}
-
-function walk(dir, files = []) {
-  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-    const full = path.join(dir, entry.name);
-    if (entry.isDirectory()) walk(full, files);
-    else if (/\.json$/i.test(entry.name)) files.push(full);
-  }
-  return files;
-}
-
-function sqlEscape(value) {
-  return String(value).replace(/'/g, "''");
-}
-
-function sha256(file) {
-  return crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex");
-}
-
-function writeSqlBatch(outDir, batchIndex, rows) {
-  const file = path.join(outDir, `public-addresses-${String(batchIndex).padStart(5, "0")}.sql`);
-  const sql = [
-    "-- Public wallet import only. No private keys in this file.",
-    "insert into payment_wallets (network, token, address) values",
-    rows.map((wallet) => `('TON', 'TON', '${sqlEscape(wallet.address)}')`).join(",\n"),
-    "on conflict (address) do nothing;"
-  ].join("\n");
-  fs.writeFileSync(file, sql, "utf8");
-  return file;
-}
-
-function main() {
-  const keysDir = path.resolve(arg("keys-dir", ""));
-  const outDir = path.resolve(arg("out", path.join(process.cwd(), "public-wallet-import-1_5m")));
-  const batchSize = numberArg("sql-batch-size", 10000, 1, 10000);
-  if (!keysDir || !fs.existsSync(keysDir)) {
-    console.error("Usage: npm run wallets:public-import -- --keys-dir=C:\\secure\\private-keys --out=C:\\secure\\public-import");
-    console.error("keys-dir is required and must exist.");
-    process.exit(2);
-  }
-  if (/node_modules|\.git|outputs[\\/].*web-service|outputs[\\/].*scanner/i.test(keysDir)) {
-    console.error("Refusing to read keys from repo/build/upload folders. Use an offline private-keys folder.");
-    process.exit(2);
-  }
-
-  fs.mkdirSync(outDir, { recursive: true });
-  const files = walk(keysDir).sort((a, b) => a.localeCompare(b));
-  const seen = new Set();
-  const duplicates = [];
-  const wallets = [];
-
-  for (const file of files) {
-    const payload = JSON.parse(fs.readFileSync(file, "utf8"));
-    const address = String(payload.address || "").trim();
-    if (!/^(EQ|UQ)[A-Za-z0-9_-]{30,}$/.test(address)) continue;
-    if (seen.has(address)) {
-      duplicates.push({ address, file });
-      continue;
-    }
-    seen.add(address);
-    wallets.push({
-      label: payload.label || path.basename(file, ".json"),
-      address,
-      raw_address: payload.raw_address || "",
-      source_file_sha256: sha256(file)
+function requestJson(pathname) {
+  const url = `${baseUrl}${pathname}`;
+  return new Promise((resolve, reject) => {
+    const lib = url.startsWith("https:") ? https : http;
+    const req = lib.get(url, { timeout: timeoutMs }, (res) => {
+      let body = "";
+      res.setEncoding("utf8");
+      res.on("data", (chunk) => { body += chunk; });
+      res.on("end", () => {
+        try {
+          resolve({ endpoint: pathname, statusCode: res.statusCode, json: JSON.parse(body) });
+        } catch {
+          reject(new Error(`${pathname} did not return JSON: ${body.slice(0, 160)}`));
+        }
+      });
     });
-  }
-
-  let batch = [];
-  let batchIndex = 1;
-  const batches = [];
-  for (const wallet of wallets) {
-    batch.push(wallet);
-    if (batch.length >= batchSize) {
-      const file = writeSqlBatch(outDir, batchIndex, batch);
-      batches.push({ file: path.basename(file), wallet_count: batch.length, sha256: sha256(file) });
-      batch = [];
-      batchIndex += 1;
-    }
-  }
-  if (batch.length) {
-    const file = writeSqlBatch(outDir, batchIndex, batch);
-    batches.push({ file: path.basename(file), wallet_count: batch.length, sha256: sha256(file) });
-  }
-
-  fs.writeFileSync(path.join(outDir, "wallets-public.csv"), [
-    "label,address,raw_address",
-    ...wallets.map((wallet) => `"${String(wallet.label).replace(/"/g, '""')}","${wallet.address}","${wallet.raw_address}"`)
-  ].join("\n"), "utf8");
-
-  fs.writeFileSync(path.join(outDir, "wallet-public-import-manifest-1_5m.json"), JSON.stringify({
-    generated_at: new Date().toISOString(),
-    source_keys_dir: keysDir,
-    wallet_count: wallets.length,
-    duplicate_count: duplicates.length,
-    sql_batch_size: batchSize,
-    sql_batches: batches,
-    safe_to_upload_to_supabase: duplicates.length === 0 && wallets.length > 0,
-    warning: "Only public-addresses SQL files go to Supabase. Keep source private keys offline."
-  }, null, 2), "utf8");
-
-  if (duplicates.length) {
-    fs.writeFileSync(path.join(outDir, "duplicates.json"), JSON.stringify(duplicates, null, 2), "utf8");
-    console.error(`duplicate_count=${duplicates.length}`);
-    process.exit(1);
-  }
-
-  console.log(`wallet_count=${wallets.length}`);
-  console.log(`sql_batches=${batches.length}`);
-  console.log(`out=${outDir}`);
+    req.on("timeout", () => req.destroy(new Error(`${pathname} timed out after ${timeoutMs}ms`)));
+    req.on("error", reject);
+  });
 }
 
-main();
+function requestJsonWithCurl(pathname) {
+  const url = `${baseUrl}${pathname}`;
+  const result = spawnSync("curl.exe", ["-s", "--max-time", String(Math.ceil(timeoutMs / 1000)), url], {
+    encoding: "utf8"
+  });
+  if (result.error) throw result.error;
+  if (result.status !== 0) throw new Error(result.stderr || `curl exited with ${result.status}`);
+  return {
+    endpoint: pathname,
+    statusCode: 200,
+    json: JSON.parse(result.stdout)
+  };
+}
+
+async function main() {
+  const endpoints = [
+    "/healthz",
+    "/ops/control-tower?fresh=true",
+    "/ops/blocker-actions?fresh=true",
+    "/ops/env-contract",
+    "/ops/scanner-worker-plan",
+    "/ops/wallet-import-plan",
+    "/ops/redis-deep",
+    "/ops/ton-signer"
+  ];
+  const results = [];
+  const errors = [];
+  for (const endpoint of endpoints) {
+    try {
+      try {
+        results.push(await requestJson(endpoint));
+      } catch {
+        results.push(requestJsonWithCurl(endpoint));
+      }
+    } catch (err) {
+      errors.push({ endpoint, error: err.message || String(err) });
+    }
+  }
+  const control = results.find((item) => item.endpoint.startsWith("/ops/control-tower"))?.json || {};
+  const actions = control.blockers || [];
+  const report = {
+    generated_at: new Date().toISOString(),
+    baseUrl,
+    status: errors.length ? "error" : (control.status || "unknown"),
+    ready: Boolean(control.ready),
+    blockers: actions,
+    errors,
+    results: results.map((item) => ({
+      endpoint: item.endpoint,
+      http: item.statusCode,
+      status: item.json.status || item.json.gates?.final_gate?.status || "ok",
+      version: item.json.version || item.json.gates?.final_gate?.version || null
+    }))
+  };
+  fs.mkdirSync(outputDir, { recursive: true });
+  fs.writeFileSync(outputFile, `${JSON.stringify(report, null, 2)}\n`, "utf8");
+  console.log(JSON.stringify(report, null, 2));
+  console.log(`diagnosis=${outputFile}`);
+  if (errors.length) process.exit(1);
+}
+
+main().catch((err) => {
+  console.error(err.stack || err.message);
+  process.exit(1);
+});

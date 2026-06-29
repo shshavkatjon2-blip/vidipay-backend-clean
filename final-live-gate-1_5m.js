@@ -1,99 +1,72 @@
-const fs = require("fs");
-const path = require("path");
-const http = require("http");
-const https = require("https");
-const { spawnSync } = require("child_process");
+const { execFileSync } = require("child_process");
 
-const baseUrl = String(process.argv[2] || process.env.PUBLIC_BACKEND_URL || "https://vidipay-backend.onrender.com").replace(/\/$/, "");
-const timeoutMs = Math.max(3000, Number(process.env.LIVE_VERIFY_TIMEOUT_MS || 25000));
-const root = path.resolve(__dirname, "..");
-const packageRoot = path.resolve(root, "..");
-const outputDir = fs.existsSync(path.join(packageRoot, "ops")) ? path.join(packageRoot, "ops") : root;
-const outputFile = path.join(outputDir, "live-control-tower-diagnosis-1_5m.json");
+const DEFAULT_BASE_URL = "https://vidipay-backend.onrender.com";
 
-function requestJson(pathname) {
-  const url = `${baseUrl}${pathname}`;
-  return new Promise((resolve, reject) => {
-    const lib = url.startsWith("https:") ? https : http;
-    const req = lib.get(url, { timeout: timeoutMs }, (res) => {
-      let body = "";
-      res.setEncoding("utf8");
-      res.on("data", (chunk) => { body += chunk; });
-      res.on("end", () => {
-        try {
-          resolve({ endpoint: pathname, statusCode: res.statusCode, json: JSON.parse(body) });
-        } catch {
-          reject(new Error(`${pathname} did not return JSON: ${body.slice(0, 160)}`));
-        }
-      });
-    });
-    req.on("timeout", () => req.destroy(new Error(`${pathname} timed out after ${timeoutMs}ms`)));
-    req.on("error", reject);
-  });
+function readEnv(name, fallback = "") {
+  return String(process.env[name] || fallback).trim();
 }
 
-function requestJsonWithCurl(pathname) {
-  const url = `${baseUrl}${pathname}`;
-  const result = spawnSync("curl.exe", ["-s", "--max-time", String(Math.ceil(timeoutMs / 1000)), url], {
-    encoding: "utf8"
-  });
-  if (result.error) throw result.error;
-  if (result.status !== 0) throw new Error(result.stderr || `curl exited with ${result.status}`);
-  return {
-    endpoint: pathname,
-    statusCode: 200,
-    json: JSON.parse(result.stdout)
-  };
+function normalizeBaseUrl(raw) {
+  const value = String(raw || DEFAULT_BASE_URL).replace(/\/+$/, "");
+  if (!/^https?:\/\//i.test(value)) throw new Error("BASE_URL must start with http:// or https://");
+  return value;
 }
 
-async function main() {
-  const endpoints = [
-    "/healthz",
-    "/ops/control-tower?fresh=true",
-    "/ops/blocker-actions?fresh=true",
-    "/ops/env-contract",
-    "/ops/scanner-worker-plan",
-    "/ops/wallet-import-plan",
-    "/ops/redis-deep",
-    "/ops/ton-signer"
-  ];
-  const results = [];
-  const errors = [];
-  for (const endpoint of endpoints) {
+function getJson(baseUrl, path) {
+  const url = `${baseUrl}${path}`;
+  let text = "";
+  let lastError = null;
+  for (const bin of ["curl.exe", "curl"]) {
     try {
-      try {
-        results.push(await requestJson(endpoint));
-      } catch {
-        results.push(requestJsonWithCurl(endpoint));
-      }
+      text = execFileSync(bin, ["-s", "--max-time", "25", url], {
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "pipe"]
+      });
+      break;
     } catch (err) {
-      errors.push({ endpoint, error: err.message || String(err) });
+      lastError = err;
     }
   }
-  const control = results.find((item) => item.endpoint.startsWith("/ops/control-tower"))?.json || {};
-  const actions = control.blockers || [];
-  const report = {
-    generated_at: new Date().toISOString(),
-    baseUrl,
-    status: errors.length ? "error" : (control.status || "unknown"),
-    ready: Boolean(control.ready),
-    blockers: actions,
-    errors,
-    results: results.map((item) => ({
-      endpoint: item.endpoint,
-      http: item.statusCode,
-      status: item.json.status || item.json.gates?.final_gate?.status || "ok",
-      version: item.json.version || item.json.gates?.final_gate?.version || null
-    }))
-  };
-  fs.mkdirSync(outputDir, { recursive: true });
-  fs.writeFileSync(outputFile, `${JSON.stringify(report, null, 2)}\n`, "utf8");
-  console.log(JSON.stringify(report, null, 2));
-  console.log(`diagnosis=${outputFile}`);
-  if (errors.length) process.exit(1);
+  if (!text && lastError) throw lastError;
+  if (!text.trim()) throw new Error(`Empty response from ${url}`);
+  return JSON.parse(text);
 }
 
-main().catch((err) => {
-  console.error(err.stack || err.message);
-  process.exit(1);
-});
+function line(name, ok, detail = "") {
+  console.log(`${ok ? "OK" : "FAIL"} ${name} ${detail}`.trim());
+}
+
+function main() {
+  const baseUrl = normalizeBaseUrl(readEnv("BASE_URL", DEFAULT_BASE_URL));
+  const health = getJson(baseUrl, "/healthz");
+  const gate = getJson(baseUrl, "/ops/final-gate");
+  const scanner = getJson(baseUrl, "/scanner/healthz");
+  const wallet = getJson(baseUrl, "/ops/wallet-capacity");
+  const redis = getJson(baseUrl, "/ops/redis");
+  const signer = getJson(baseUrl, "/ops/ton-signer");
+
+  const checks = [
+    ["version", health.version === "v1.8.2-infra-autopilot-20260628", health.version],
+    ["redis", redis.redis?.ok === true, redis.redis?.message || redis.redis?.error || redis.status],
+    ["scanner_workers", Number(scanner.scanner_workers_alive || 0) >= 4, `alive=${scanner.scanner_workers_alive}`],
+    ["wallet_capacity", Number(wallet.wallet_capacity?.capacity_gap ?? -1) >= 0, `gap=${wallet.wallet_capacity?.capacity_gap}`],
+    ["ton_signer", signer.ton_signer?.ok === true, `wallet_files=${signer.ton_signer?.signer?.wallet_files}`],
+    ["final_gate", gate.gate?.ready_for_1_5m_public_traffic === true, `status=${gate.gate?.status}`]
+  ];
+
+  console.log(`base_url=${baseUrl}`);
+  for (const [name, ok, detail] of checks) line(name, ok, detail);
+
+  const failed = checks.filter(([, ok]) => !ok);
+  if (failed.length) {
+    console.log("");
+    console.log("ACTION REQUIRED:");
+    for (const [name,, detail] of failed) console.log(`- ${name}: ${detail}`);
+    process.exit(1);
+  }
+
+  console.log("");
+  console.log("FINAL 1.5M LIVE GATE OK");
+}
+
+main();

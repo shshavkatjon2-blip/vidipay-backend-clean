@@ -3,151 +3,157 @@ const path = require("path");
 
 const root = path.resolve(__dirname, "..");
 const packageRoot = path.resolve(root, "..");
-const opsDir = fs.existsSync(path.join(packageRoot, "ops")) ? path.join(packageRoot, "ops") : root;
-const targetUsers = Number(process.env.CAPACITY_TARGET_USERS || 1500000);
-const currentAvailable = Number(process.env.CURRENT_AVAILABLE_WALLETS || 100001);
-const missingWallets = Math.max(0, targetUsers - currentAvailable);
+const opsDir = path.join(packageRoot, "ops");
+const envDir = path.join(packageRoot, "env");
+const blueprintDir = path.join(packageRoot, "render-blueprints");
 
-function write(name, content) {
-  fs.mkdirSync(opsDir, { recursive: true });
-  const filePath = path.join(opsDir, name);
-  fs.writeFileSync(filePath, content.trimEnd() + "\n", "utf8");
-  return filePath;
+function write(file, content) {
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, content.endsWith("\n") ? content : `${content}\n`, "utf8");
+  console.log(path.relative(packageRoot, file).replace(/\\/g, "/"));
 }
 
-function scannerEnv(count) {
-  const blocks = [];
-  for (let index = 0; index < count; index += 1) {
-    blocks.push([
-      `# ===== scanner-${count}-${index} =====`,
-      "NODE_ENV=production",
-      "WORKER_MODE=scanner",
-      "PAYMENT_SCANNER_ENABLED=true",
-      `PAYMENT_SCANNER_WORKER_ID=scanner-${count}-${index}`,
-      `PAYMENT_SCANNER_SHARD_COUNT=${count}`,
-      `PAYMENT_SCANNER_SHARD_INDEX=${index}`,
-      "PAYMENT_SCAN_INTERVAL_MS=3000",
-      "PAYMENT_SCAN_BATCH_SIZE=500",
-      "PAYMENT_SCAN_CONCURRENCY=32",
-      "PAYMENT_SCAN_JITTER_MS=2500",
-      "PAYMENT_SCAN_ORDER_DELAY_MS=10",
-      "PAYMENT_SCAN_MAX_ERRORS_PER_RUN=500",
-      "PAYMENT_SCANNER_HEARTBEAT_READ_LIMIT=512",
-      "REDIS_SCANNER_LOCKS_ENABLED=true",
-      "REDIS_SCANNER_LOCKS_REQUIRED=false",
-      "REDIS_SCANNER_LOCK_TTL_MS=60000",
-      "SUPABASE_URL=",
-      "SUPABASE_SERVICE_ROLE_KEY=",
-      "TONAPI_BASE_URL=https://tonapi.io",
-      "TONAPI_KEY="
-    ].join("\n"));
+function envBlock(items) {
+  return items.map(([key, value]) => `${key}=${value}`).join("\n");
+}
+
+function scannerMatrix(counts) {
+  const lines = [];
+  for (const count of counts) {
+    lines.push(`# ${count} scanner workers`);
+    for (let index = 0; index < count; index += 1) {
+      lines.push(`PAYMENT_SCANNER_WORKER_ID=vidipay-scanner-${String(index).padStart(3, "0")}`);
+      lines.push(`PAYMENT_SCANNER_SHARD_COUNT=${count}`);
+      lines.push(`PAYMENT_SCANNER_SHARD_INDEX=${index}`);
+      lines.push("WORKER_MODE=scanner");
+      lines.push("PAYMENT_SCANNER_ENABLED=true");
+      lines.push("REDIS_SCANNER_LOCKS_ENABLED=true");
+      lines.push("");
+    }
   }
-  return blocks.join("\n\n");
+  return lines.join("\n");
+}
+
+function webBlueprint() {
+  return `services:
+  - type: web
+    name: vidipay-backend
+    runtime: node
+    plan: pro
+    buildCommand: node render-build-fix.cjs && npm install --omit=dev --no-audit --no-fund
+    startCommand: npm start
+    healthCheckPath: /healthz
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: WORKER_MODE
+        value: api
+      - key: PAYMENT_SCANNER_ENABLED
+        value: false
+      - key: RATE_LIMIT_BACKEND
+        value: redis
+      - key: REDIS_URL
+        sync: false
+      - key: REDIS_DEEP_CHECK_ENABLED
+        value: true
+      - key: TON_AUTO_PAYOUT_ENABLED
+        value: true
+      - key: TON_SIGNER_ENABLED
+        value: true
+      - key: TON_SIGNER_KEYS_DIR
+        sync: false
+      - key: TON_RPC_ENDPOINT
+        sync: false
+      - key: TON_RPC_API_KEY
+        sync: false
+`;
 }
 
 function main() {
-  const files = [];
-  files.push(write("01_RENDER_WEB_SERVICE_ENV_CLOSEOUT_1_5M.env", `
-NODE_ENV=production
-WORKER_MODE=api
-PAYMENT_SCANNER_ENABLED=false
-RATE_LIMIT_BACKEND=redis
-REDIS_URL=
-REDIS_DEEP_CHECK_ENABLED=true
-PAYMENT_SCANNER_HEARTBEAT_READ_LIMIT=512
-OPS_SNAPSHOT_CACHE_TTL_MS=2000
-FINAL_GATE_MIN_SCANNER_WORKERS=4
-CAPACITY_TARGET_USERS=1500000
-SUPABASE_URL=
-SUPABASE_SERVICE_ROLE_KEY=
-ADMIN_TOKEN=
-BOT_TOKEN=
-TELEGRAM_WEBHOOK_SECRET=
-PUBLIC_BACKEND_URL=https://vidipay-backend.onrender.com
-PUBLIC_APP_URL=
-GAME_URL=
-ALLOWED_ORIGINS=https://shshavkatjon2-blip.github.io,https://web.telegram.org,https://telegram.org
-TONAPI_BASE_URL=https://tonapi.io
-TONAPI_KEY=
-TON_AUTO_PAYOUT_ENABLED=true
-TON_SIGNER_ENABLED=true
-REQUIRE_TON_AUTO_PAYOUT_FOR_1_5M=true
-TON_SIGNER_NETWORK=mainnet
-TON_SIGNER_KEYS_DIR=
-TON_RPC_ENDPOINT=
-TON_RPC_API_KEY=
-TON_PAYOUT_GAS_RESERVE=0.10
-TON_PAYOUT_BODY=VidiPay activation payout
-ACTIVATION_DEPOSIT_TON=6.99
-TON_PAYMENT_MIN_RECEIVED=6.90
-TON_PAYMENT_MAX_RECEIVED=7.05
-`));
+  fs.mkdirSync(opsDir, { recursive: true });
+  fs.mkdirSync(envDir, { recursive: true });
+  fs.mkdirSync(blueprintDir, { recursive: true });
 
-  files.push(write("02_SCANNER_WORKERS_4_SHARDS_ENV_CLOSEOUT_1_5M.txt", scannerEnv(4)));
-  files.push(write("03_SCANNER_WORKERS_16_SHARDS_ENV_CLOSEOUT_1_5M.txt", scannerEnv(16)));
+  write(path.join(envDir, "RENDER_WEB_SERVICE_INFRA_AUTOPILOT_1_5M.env"), envBlock([
+    ["NODE_ENV", "production"],
+    ["WORKER_MODE", "api"],
+    ["PAYMENT_SCANNER_ENABLED", "false"],
+    ["RATE_LIMIT_BACKEND", "redis"],
+    ["REDIS_URL", ""],
+    ["REDIS_DEEP_CHECK_ENABLED", "true"],
+    ["REDIS_SCANNER_LOCKS_ENABLED", "false"],
+    ["OPS_SNAPSHOT_CACHE_TTL_MS", "2000"],
+    ["SCALE_AUDIT_COUNT_MODE", "planned"],
+    ["CAPACITY_TARGET_USERS", "1500000"],
+    ["FINAL_GATE_MIN_SCANNER_WORKERS", "4"],
+    ["TONAPI_KEY", ""],
+    ["TONAPI_BASE_URL", "https://tonapi.io"],
+    ["TON_AUTO_PAYOUT_ENABLED", "true"],
+    ["TON_SIGNER_ENABLED", "true"],
+    ["TON_SIGNER_KEYS_DIR", ""],
+    ["TON_RPC_ENDPOINT", ""],
+    ["TON_RPC_API_KEY", ""]
+  ]));
 
-  files.push(write("04_WALLET_GENERATION_COMMANDS_1_5M.ps1", `
-# Run locally only. Do not upload private-keys anywhere.
-cd "C:\\Users\\MYCOM Official Win\\Documents\\Codex\\2026-06-15\\salom\\outputs\\UPLOAD_1_5M_BLOCKER_CLOSEOUT_EXECUTION_BATCH_2026-06-28\\web-service-vidipay-backend"
+  write(path.join(envDir, "TON_SIGNER_ENV_REQUIRED_1_5M.env"), envBlock([
+    ["TON_AUTO_PAYOUT_ENABLED", "true"],
+    ["TON_SIGNER_ENABLED", "true"],
+    ["TON_SIGNER_KEYS_DIR", ""],
+    ["TON_RPC_ENDPOINT", ""],
+    ["TON_RPC_API_KEY", ""],
+    ["TON_PAYOUT_GAS_RESERVE", "0.10"],
+    ["TON_PAYOUT_BODY", "VidiPay activation payout"],
+    ["REQUIRE_TON_AUTO_PAYOUT_FOR_1_5M", "true"]
+  ]));
 
-npm.cmd install --omit=dev
+  write(path.join(envDir, "SCANNER_WORKER_ENV_MATRIX_4_16_64_INFRA_AUTOPILOT_1_5M.txt"), scannerMatrix([4, 16, 64]));
+  write(path.join(blueprintDir, "vidipay-web-service-render.yaml"), webBlueprint());
 
-npm.cmd run wallets:generate-missing -- --target=${targetUsers} --current-available=${currentAvailable} --buffer=0 --out="$env:USERPROFILE\\Desktop\\vidipay-ton-wallet-pool-1_5m" --network=mainnet --key-format=mnemonic --sql-batch-size=10000 --confirm-private-output=yes
+  write(path.join(opsDir, "INFRA_AUTOPILOT_APPLY_ORDER_1_5M.md"), `# VidiPay 1.5M Infra Autopilot Apply Order
 
-npm.cmd run wallets:verify -- --pool="$env:USERPROFILE\\Desktop\\vidipay-ton-wallet-pool-1_5m" --expected-count=${missingWallets}
+Run this order only:
 
-npm.cmd run verify:wallet-sql -- "$env:USERPROFILE\\Desktop\\vidipay-ton-wallet-pool-1_5m"
-`));
+1. Upload web service zip to \`vidipay-backend\`.
+2. Set \`env/RENDER_WEB_SERVICE_INFRA_AUTOPILOT_1_5M.env\` values in Render Web Service. Fill secrets manually.
+3. Upload scanner worker zip to scanner worker repo.
+4. Create 4 Background Workers first using \`render-blueprints/scanner-workers-4.autopilot.yaml\` or env matrix.
+5. Generate/import missing wallet public SQL. Private keys stay offline.
+6. Configure TON signer env and mounted key dir.
+7. Verify \`/ops/infra-autopilot?fresh=true\`, then \`/ops/final-gate\`.
 
-  files.push(write("05_SIGNER_KEYS_DIR_VERIFY_COMMANDS_1_5M.ps1", `
-# Run after wallet pool generation. This does not print private keys.
-cd "C:\\Users\\MYCOM Official Win\\Documents\\Codex\\2026-06-15\\salom\\outputs\\UPLOAD_1_5M_BLOCKER_CLOSEOUT_EXECUTION_BATCH_2026-06-28\\web-service-vidipay-backend"
-npm.cmd run verify:signer-keys -- --keys-dir="$env:USERPROFILE\\Desktop\\vidipay-ton-wallet-pool-1_5m\\private-keys" --min-files=1
-`));
+Do not upload \`private-keys\`, \`.env.local\`, \`node_modules\`, or \`package-lock.json\`.
+`);
 
-  files.push(write("06_SUPABASE_SQL_CLOSEOUT_RUN_ORDER_1_5M.txt", `
-Run in Supabase SQL Editor, in this exact order:
+  write(path.join(opsDir, "TON_SIGNER_PAYOUT_CLOSEOUT_1_5M.md"), `# TON Signer Payout Closeout
 
-1. sql/RUN_HYPERSCALE_SQL_2026-06-27.sql
-2. sql/IMPORT_PROGRESS_TABLE_1_5M.sql
-3. generated public-addresses-*.sql files from the wallet pool folder
-4. sql/WALLET_IMPORT_AFTER_GENERATION_VERIFY_1_5M.sql
-5. sql/WALLET_IMPORT_MANIFEST_AUDIT_1_5M.sql
-6. sql/WALLET_ASSIGNMENT_INTEGRITY_AUDIT_1_5M.sql
-7. sql/PAYMENT_ORDER_TO_WALLET_LINK_AUDIT_1_5M.sql
-8. sql/TON_DEPOSIT_REFUND_AUDIT_1_5M.sql
-9. sql/CLOSEOUT_FINAL_SQL_AUDIT_1_5M.sql
-10. sql/CONTROL_TOWER_SQL_AUDIT_1_5M.sql
-`));
+Required before automatic deposit refund:
 
-  files.push(write("BLOCKER_CLOSEOUT_EXECUTION_README_1_5M.md", `
-# 1.5M Blocker Closeout Execution Kit
+- \`TON_AUTO_PAYOUT_ENABLED=true\`
+- \`TON_SIGNER_ENABLED=true\`
+- \`TON_SIGNER_KEYS_DIR\` points to protected local/mounted private-key folder
+- \`TON_RPC_ENDPOINT\` is a working TON RPC endpoint
+- \`TON_RPC_API_KEY\` is the matching RPC key
 
-This kit targets the four real blockers currently shown by live control tower:
+Only the signer runtime can see private keys. GitHub, Supabase, Render repo uploads, frontend, and admin panel must not contain mnemonic or seed files.
+`);
 
-1. Redis env is missing.
-2. Scanner workers are not heartbeating.
-3. Wallet pool is short by ${missingWallets} wallets.
-4. TON signer/RPC is not enabled.
-
-Use the files in this folder:
-
-- 01_RENDER_WEB_SERVICE_ENV_CLOSEOUT_1_5M.env
-- 02_SCANNER_WORKERS_4_SHARDS_ENV_CLOSEOUT_1_5M.txt
-- 03_SCANNER_WORKERS_16_SHARDS_ENV_CLOSEOUT_1_5M.txt
-- 04_WALLET_GENERATION_COMMANDS_1_5M.ps1
-- 05_SIGNER_KEYS_DIR_VERIFY_COMMANDS_1_5M.ps1
-- 06_SUPABASE_SQL_CLOSEOUT_RUN_ORDER_1_5M.txt
-
-After upload and env setup, verify:
-
-- https://vidipay-backend.onrender.com/ops/control-tower?fresh=true
-- https://vidipay-backend.onrender.com/ops/blocker-actions?fresh=true
-- https://vidipay-backend.onrender.com/ops/final-gate
-`));
-
-  console.log(`closeout_files=${files.length}`);
-  for (const file of files) console.log(file);
+  write(path.join(opsDir, "infra-autopilot-manifest-1_5m.json"), JSON.stringify({
+    generated_at: new Date().toISOString(),
+    target_users: 1500000,
+    generated_files: [
+      "env/RENDER_WEB_SERVICE_INFRA_AUTOPILOT_1_5M.env",
+      "env/SCANNER_WORKER_ENV_MATRIX_4_16_64_INFRA_AUTOPILOT_1_5M.txt",
+      "env/TON_SIGNER_ENV_REQUIRED_1_5M.env",
+      "render-blueprints/vidipay-web-service-render.yaml",
+      "ops/INFRA_AUTOPILOT_APPLY_ORDER_1_5M.md",
+      "ops/TON_SIGNER_PAYOUT_CLOSEOUT_1_5M.md"
+    ],
+    verify_after_deploy: [
+      "/ops/infra-autopilot?fresh=true",
+      "/ops/control-tower?fresh=true",
+      "/ops/final-gate"
+    ]
+  }, null, 2));
 }
 
 main();

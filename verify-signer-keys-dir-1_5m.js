@@ -10,41 +10,49 @@ function readArg(name, fallback = "") {
   return fallback;
 }
 
-function parseEnv(text) {
-  const out = {};
-  for (const line of text.split(/\r?\n/)) {
-    const trimmed = line.trim();
-    if (!trimmed || trimmed.startsWith("#")) continue;
-    const index = trimmed.indexOf("=");
-    if (index < 0) continue;
-    out[trimmed.slice(0, index).trim()] = trimmed.slice(index + 1).trim();
+function walk(dir, files = []) {
+  if (!fs.existsSync(dir)) return files;
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    const full = path.join(dir, entry.name);
+    if (entry.isDirectory()) walk(full, files);
+    else if (entry.name.endsWith(".json")) files.push(full);
   }
-  return out;
-}
-
-function hasValue(value) {
-  return Boolean(String(value || "").trim()) && !/^(PASTE|CHANGE|TODO|YOUR_|placeholder)/i.test(String(value || "").trim());
+  return files;
 }
 
 function main() {
-  const file = path.resolve(readArg("file", ""));
-  const role = readArg("role", "api");
-  if (!file || !fs.existsSync(file)) throw new Error(`Env file not found: ${file}`);
-  const env = parseEnv(fs.readFileSync(file, "utf8"));
-  const requiredByRole = {
-    api: ["SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY", "ADMIN_TOKEN", "BOT_TOKEN", "TELEGRAM_WEBHOOK_SECRET", "TONAPI_KEY", "RATE_LIMIT_BACKEND", "REDIS_URL", "TON_AUTO_PAYOUT_ENABLED", "TON_SIGNER_ENABLED", "TON_SIGNER_KEYS_DIR", "TON_RPC_ENDPOINT", "TON_RPC_API_KEY"],
-    scanner: ["SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY", "TONAPI_KEY", "TONAPI_BASE_URL", "WORKER_MODE", "PAYMENT_SCANNER_ENABLED", "PAYMENT_SCANNER_WORKER_ID", "PAYMENT_SCANNER_SHARD_COUNT", "PAYMENT_SCANNER_SHARD_INDEX"],
-    signer: ["TON_AUTO_PAYOUT_ENABLED", "TON_SIGNER_ENABLED", "TON_SIGNER_KEYS_DIR", "TON_RPC_ENDPOINT", "TON_RPC_API_KEY"]
+  const keysDir = path.resolve(readArg("keys-dir", ""));
+  const minFiles = Math.max(1, Number(readArg("min-files", "1")));
+  if (!keysDir || !fs.existsSync(keysDir)) throw new Error(`TON_SIGNER_KEYS_DIR not found: ${keysDir}`);
+  const files = walk(keysDir);
+  const addresses = new Set();
+  let valid = 0;
+  let invalid = 0;
+  for (const file of files.slice(0, 10000)) {
+    try {
+      const data = JSON.parse(fs.readFileSync(file, "utf8"));
+      const hasKey = Boolean(data.mnemonic || data.seed_hex || data.secret_key || data.private_key);
+      const address = String(data.address || data.wallet_address || "").trim();
+      if (!hasKey || !address) {
+        invalid += 1;
+        continue;
+      }
+      addresses.add(address);
+      valid += 1;
+    } catch {
+      invalid += 1;
+    }
+  }
+  const report = {
+    status: files.length >= minFiles && valid > 0 && invalid === 0 ? "ok" : "failed",
+    keys_dir: keysDir,
+    files_found: files.length,
+    files_sample_checked: Math.min(files.length, 10000),
+    valid_sample: valid,
+    invalid_sample: invalid,
+    duplicate_addresses_in_sample: valid - addresses.size
   };
-  const expected = {
-    api: { RATE_LIMIT_BACKEND: "redis", TON_AUTO_PAYOUT_ENABLED: "true", TON_SIGNER_ENABLED: "true" },
-    scanner: { WORKER_MODE: "scanner", PAYMENT_SCANNER_ENABLED: "true" },
-    signer: { TON_AUTO_PAYOUT_ENABLED: "true", TON_SIGNER_ENABLED: "true" }
-  };
-  const required = requiredByRole[role] || requiredByRole.api;
-  const missing = required.filter((key) => !hasValue(env[key]));
-  const wrong = Object.entries(expected[role] || {}).filter(([key, value]) => String(env[key] || "") !== value);
-  const report = { status: missing.length || wrong.length ? "failed" : "ok", role, file, missing, wrong };
+  fs.writeFileSync(path.join(keysDir, "..", "signer-keys-dir-verification-report.json"), JSON.stringify(report, null, 2), "utf8");
   console.log(JSON.stringify(report, null, 2));
   if (report.status !== "ok") process.exit(1);
 }

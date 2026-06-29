@@ -2,14 +2,13 @@ const fs = require("fs");
 const path = require("path");
 
 const root = path.resolve(__dirname, "..");
-const packageRoot = path.resolve(root, "..");
 
 function read(file) {
   return fs.readFileSync(path.join(root, file), "utf8");
 }
 
-function existsFromPackage(file) {
-  return fs.existsSync(path.join(packageRoot, file));
+function exists(file) {
+  return fs.existsSync(path.join(root, file));
 }
 
 function fail(errors, message) {
@@ -17,88 +16,70 @@ function fail(errors, message) {
 }
 
 function assertIncludes(errors, file, pattern, label) {
+  if (!exists(file)) return fail(errors, `Missing ${file}`);
   if (!read(file).includes(pattern)) fail(errors, `${file} missing ${label || pattern}`);
+}
+
+function assertNotIncludes(errors, file, pattern, label) {
+  if (!exists(file)) return;
+  if (read(file).includes(pattern)) fail(errors, `${file} contains ${label || pattern}`);
+}
+
+function countOccurrences(text, pattern) {
+  const matches = text.match(new RegExp(pattern, "g"));
+  return matches ? matches.length : 0;
 }
 
 function main() {
   const errors = [];
+  assertIncludes(errors, "render.yaml", "buildCommand: node render-build-fix.cjs && npm install --omit=dev --no-audit --no-fund", "safe clean install build command");
+  assertIncludes(errors, "render-build-fix.cjs", "fs.rmSync(\"node_modules\"", "node_modules cleanup guard");
+  assertIncludes(errors, "render-build-fix.cjs", "package-lock.json", "package-lock cleanup guard");
+  assertNotIncludes(errors, "render.yaml", "npm ci", "npm ci build command");
+  assertNotIncludes(errors, "render.yaml", "value: 512      - key", "glued YAML env row");
+  assertNotIncludes(errors, "render.yaml", "value: 60000      - key", "glued YAML env row");
 
-  for (const file of [
-    "server.js",
-    "scripts/plan-wallet-topup-1_5m.js",
-    "scripts/generate-missing-ton-wallets-to-target-1_5m.js",
-    "scripts/verify-remaining-blockers-package-1_5m.js",
-    "scripts/final-live-gate-1_5m.js",
-    "scripts/verify-public-wallet-sql-batches-1_5m.js",
-    "scripts/build-production-launch-manifest-1_5m.js",
-    "scripts/verify-hyperscale-operations-package-1_5m.js",
-    "scripts/verify-control-tower-package-1_5m.js",
-    "scripts/verify-live-ops-1_5m.js",
-    "scripts/diagnose-live-control-tower-1_5m.js",
-    "scripts/generate-wallet-import-manifest-1_5m.js",
-    "scripts/generate-scanner-shard-env-matrix-1_5m.js",
-    "scripts/generate-render-env-bundle-1_5m.js",
-    "scripts/generate-closeout-execution-kit-1_5m.js",
-    "scripts/verify-render-env-file-1_5m.js",
-    "scripts/verify-signer-keys-dir-1_5m.js"
-  ]) {
-    if (!fs.existsSync(path.join(root, file))) fail(errors, `Missing ${file}`);
+  const render = exists("render.yaml") ? read("render.yaml") : "";
+  const isWorker = render.includes("type: worker");
+  const isWeb = render.includes("type: web");
+
+  if (!isWorker && !isWeb) fail(errors, "render.yaml must be either Web Service or Background Worker");
+
+  if (isWeb) {
+    assertIncludes(errors, "render.yaml", "startCommand: npm start", "Web Service start command");
+    assertIncludes(errors, "render.yaml", "PAYMENT_SCANNER_ENABLED", "API scanner disabled marker");
+    assertIncludes(errors, "render.yaml", "RATE_LIMIT_BACKEND", "API Redis rate-limit marker");
+    assertIncludes(errors, "render.yaml", "CAPACITY_TARGET_USERS", "1.5M target env marker");
+    assertIncludes(errors, "render.yaml", "PAYMENT_SCANNER_HEARTBEAT_READ_LIMIT", "scanner heartbeat read limit marker");
+    assertIncludes(errors, "render.yaml", "OPS_SNAPSHOT_CACHE_TTL_MS", "ops snapshot cache marker");
   }
 
-  assertIncludes(errors, "server.js", 'app.get("/ops/redis"', "/ops/redis endpoint");
-  assertIncludes(errors, "server.js", 'app.get("/ops/ton-signer"', "/ops/ton-signer endpoint");
-  assertIncludes(errors, "server.js", 'app.get("/ops/final-gate"', "/ops/final-gate endpoint");
-  assertIncludes(errors, "server.js", 'app.get("/ops/redis-deep"', "/ops/redis-deep endpoint");
-  assertIncludes(errors, "server.js", 'app.get("/ops/wallet-import-plan"', "/ops/wallet-import-plan endpoint");
-  assertIncludes(errors, "server.js", 'app.get("/ops/launch-checklist"', "/ops/launch-checklist endpoint");
-  assertIncludes(errors, "server.js", 'app.get("/ops/control-tower"', "/ops/control-tower endpoint");
-  assertIncludes(errors, "server.js", 'app.get("/ops/blocker-actions"', "/ops/blocker-actions endpoint");
-  assertIncludes(errors, "server.js", 'app.get("/ops/env-contract"', "/ops/env-contract endpoint");
-  assertIncludes(errors, "server.js", 'app.get("/ops/scanner-worker-plan"', "/ops/scanner-worker-plan endpoint");
-  assertIncludes(errors, "server.js", "REQUIRE_TON_AUTO_PAYOUT_FOR_1_5M", "1.5M signer requirement flag");
-  assertIncludes(errors, "server.js", "buildFinalLaunchGate", "final launch gate helper");
-  assertIncludes(errors, "server.js", "acquireScannerDistributedLock", "scanner distributed lock helper");
-  assertIncludes(errors, "server.js", "buildTonSignerReadinessReport", "TON signer readiness report");
-  assertIncludes(errors, "server.js", "checkRedisHealth", "Redis readiness report");
-  assertIncludes(errors, "server.js", "checkRedisDeepHealth", "Redis deep readiness report");
-  assertIncludes(errors, "server.js", "PAYMENT_SCANNER_HEARTBEAT_READ_LIMIT", "scanner heartbeat read limit");
-  assertIncludes(errors, "server.js", "OPS_SNAPSHOT_CACHE_TTL_MS", "ops snapshot cache ttl");
-
-  for (const file of [
-    "env/RENDER_WEB_SERVICE_FINAL_1_5M.env",
-    "env/RENDER_SCANNER_WORKERS_FINAL_1_5M.env",
-    "env/SIGNER_AUTO_PAYOUT_REQUIRED_1_5M.env",
-    "env/WALLET_TOPUP_GENERATION_LOCAL_1_5M.env",
-    "sql/FINAL_REMAINING_BLOCKERS_AUDIT_1_5M.sql",
-    "sql/WALLET_IMPORT_AFTER_GENERATION_VERIFY_1_5M.sql",
-    "sql/FINAL_GATE_SQL_VERIFY_1_5M.sql",
-    "sql/FINAL_OPERATIONAL_GATE_1_5M.sql",
-    "sql/WALLET_IMPORT_MANIFEST_AUDIT_1_5M.sql",
-    "sql/SCANNER_WORKER_OPERATIONS_AUDIT_1_5M.sql",
-    "sql/CONTROL_TOWER_SQL_AUDIT_1_5M.sql",
-    "sql/WALLET_ASSIGNMENT_INTEGRITY_AUDIT_1_5M.sql",
-    "sql/PAYMENT_ORDER_TO_WALLET_LINK_AUDIT_1_5M.sql",
-    "sql/TON_DEPOSIT_REFUND_AUDIT_1_5M.sql",
-    "sql/CLOSEOUT_FINAL_SQL_AUDIT_1_5M.sql",
-    "ops/ONE_SHOT_REMAINING_BLOCKERS_RUNBOOK_1_5M.md",
-    "ops/PRODUCTION_LAUNCH_SEQUENCE_1_5M.md",
-    "ops/HYPERSCALE_OPERATIONS_RUNBOOK_1_5M.md",
-    "ops/CONTROL_TOWER_RUNBOOK_1_5M.md",
-    "env/RENDER_1_5M_REQUIRED_ALL_NO_SECRETS.env",
-    "env/REDIS_SCANNER_LOCKS_1_5M.env",
-    "env/CONTROL_TOWER_ENV_1_5M.env",
-    "sql/IMPORT_PROGRESS_TABLE_1_5M.sql"
-  ]) {
-    if (!existsFromPackage(file)) fail(errors, `Missing package file ${file}`);
+  if (isWorker) {
+    assertIncludes(errors, "render.yaml", "startCommand: npm run start:scanner", "Background Worker start command");
+    assertIncludes(errors, "render.yaml", "WORKER_MODE", "scanner worker mode env");
+    assertIncludes(errors, "render.yaml", "PAYMENT_SCANNER_SHARD_COUNT", "scanner shard count env");
+    assertIncludes(errors, "render.yaml", "PAYMENT_SCANNER_SHARD_INDEX", "scanner shard index env");
+    assertIncludes(errors, "render.yaml", "PAYMENT_SCANNER_HEARTBEAT_READ_LIMIT", "scanner heartbeat read limit env");
+    for (const file of ["render.4-workers.yaml", "render.16-workers.yaml", "render.64-workers.yaml", "render.256-workers.yaml"]) {
+      assertIncludes(errors, file, "startCommand: npm run start:scanner", `${file} scanner start command`);
+      assertIncludes(errors, file, "PAYMENT_SCANNER_HEARTBEAT_READ_LIMIT", `${file} scanner heartbeat read limit`);
+      assertNotIncludes(errors, file, "npm ci", `${file} npm ci`);
+      assertNotIncludes(errors, file, "value: 512      - key", `${file} glued YAML env row`);
+      assertNotIncludes(errors, file, "value: 60000      - key", `${file} glued YAML env row`);
+    }
+    const blueprint16 = exists("render.16-workers.yaml") ? read("render.16-workers.yaml") : "";
+    const serviceCount16 = countOccurrences(blueprint16, "type: worker");
+    if (serviceCount16 !== 16) fail(errors, `render.16-workers.yaml expected 16 workers, got ${serviceCount16}`);
   }
 
   if (errors.length) {
-    console.error("REMAINING BLOCKERS PACKAGE CHECK FAILED");
+    console.error("RENDER BLUEPRINT CHECK FAILED");
     for (const error of errors) console.error(`- ${error}`);
     process.exit(1);
   }
 
-  console.log("REMAINING BLOCKERS PACKAGE CHECK OK");
+  console.log("RENDER BLUEPRINT CHECK OK");
+  console.log(`service_type=${isWorker ? "worker" : "web"}`);
 }
 
 main();

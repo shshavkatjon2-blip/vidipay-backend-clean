@@ -1,60 +1,99 @@
 const fs = require("fs");
 const path = require("path");
 
-function readArg(name, fallback = "") {
-  const prefix = `--${name}=`;
-  const direct = process.argv.find((item) => item.startsWith(prefix));
-  if (direct) return direct.slice(prefix.length);
-  const index = process.argv.indexOf(`--${name}`);
-  if (index >= 0 && process.argv[index + 1]) return process.argv[index + 1];
-  return fallback;
+const root = path.resolve(__dirname, "..");
+const candidateDirs = [
+  path.join(root, "sql"),
+  path.join(root, "..", "sql")
+];
+const sqlDir = candidateDirs.find((dir) => fs.existsSync(dir));
+
+function read(file) {
+  return fs.readFileSync(path.join(sqlDir, file), "utf8");
 }
 
-function walk(dir, files = []) {
-  if (!fs.existsSync(dir)) return files;
-  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-    const full = path.join(dir, entry.name);
-    if (entry.isDirectory()) walk(full, files);
-    else if (entry.name.endsWith(".json")) files.push(full);
-  }
-  return files;
+function fail(errors, message) {
+  errors.push(message);
+}
+
+function assertFile(errors, file) {
+  if (!fs.existsSync(path.join(sqlDir, file))) fail(errors, `Missing sql/${file}`);
+}
+
+function assertIncludes(errors, file, pattern, label) {
+  const text = read(file);
+  if (!text.includes(pattern)) fail(errors, `${file} missing ${label || pattern}`);
 }
 
 function main() {
-  const keysDir = path.resolve(readArg("keys-dir", ""));
-  const minFiles = Math.max(1, Number(readArg("min-files", "1")));
-  if (!keysDir || !fs.existsSync(keysDir)) throw new Error(`TON_SIGNER_KEYS_DIR not found: ${keysDir}`);
-  const files = walk(keysDir);
-  const addresses = new Set();
-  let valid = 0;
-  let invalid = 0;
-  for (const file of files.slice(0, 10000)) {
-    try {
-      const data = JSON.parse(fs.readFileSync(file, "utf8"));
-      const hasKey = Boolean(data.mnemonic || data.seed_hex || data.secret_key || data.private_key);
-      const address = String(data.address || data.wallet_address || "").trim();
-      if (!hasKey || !address) {
-        invalid += 1;
-        continue;
-      }
-      addresses.add(address);
-      valid += 1;
-    } catch {
-      invalid += 1;
-    }
+  if (!sqlDir) {
+    console.log("SQL PACKAGE CHECK SKIPPED");
+    console.log("reason=sql directory is not bundled with this repo-only upload");
+    return;
   }
-  const report = {
-    status: files.length >= minFiles && valid > 0 && invalid === 0 ? "ok" : "failed",
-    keys_dir: keysDir,
-    files_found: files.length,
-    files_sample_checked: Math.min(files.length, 10000),
-    valid_sample: valid,
-    invalid_sample: invalid,
-    duplicate_addresses_in_sample: valid - addresses.size
-  };
-  fs.writeFileSync(path.join(keysDir, "..", "signer-keys-dir-verification-report.json"), JSON.stringify(report, null, 2), "utf8");
-  console.log(JSON.stringify(report, null, 2));
-  if (report.status !== "ok") process.exit(1);
+
+  const errors = [];
+  for (const file of [
+    "RUN_HYPERSCALE_SQL_2026-06-27.sql",
+    "VERIFY_HYPERSCALE_SQL_2026-06-27.sql",
+    "POST_DEPLOY_VERIFY_1_5M.sql",
+    "SCALE_CONTRACT_AUDIT_1_5M.sql",
+    "WALLET_CAPACITY_AUDIT_1_5M.sql",
+    "PAYMENT_ORDER_SCANNER_AUDIT_1_5M.sql",
+    "PAYMENT_BACKLOG_FAST_AUDIT_1_5M.sql",
+    "SCANNER_HEARTBEAT_AUDIT_1_5M.sql",
+    "SCANNER_SHARD_COVERAGE_AUDIT_1_5M.sql",
+    "FINAL_REMAINING_BLOCKERS_AUDIT_1_5M.sql",
+    "FINAL_GATE_SQL_VERIFY_1_5M.sql",
+    "IMPORT_PROGRESS_TABLE_1_5M.sql",
+    "FINAL_OPERATIONAL_GATE_1_5M.sql",
+    "WALLET_IMPORT_MANIFEST_AUDIT_1_5M.sql",
+    "SCANNER_WORKER_OPERATIONS_AUDIT_1_5M.sql",
+    "CONTROL_TOWER_SQL_AUDIT_1_5M.sql",
+    "WALLET_ASSIGNMENT_INTEGRITY_AUDIT_1_5M.sql",
+    "PAYMENT_ORDER_TO_WALLET_LINK_AUDIT_1_5M.sql",
+    "TON_DEPOSIT_REFUND_AUDIT_1_5M.sql",
+    "CLOSEOUT_FINAL_SQL_AUDIT_1_5M.sql",
+    "INFRA_AUTOPILOT_SQL_GATE_1_5M.sql",
+    "WALLET_PUBLIC_IMPORT_STAGING_TEMPLATE_1_5M.sql",
+    "COPY_THIS_FIRST_FIX_SHARD_COLUMNS_1_5M.sql",
+    "RUN_SQL_IN_THIS_ORDER_1_5M.txt"
+  ]) {
+    assertFile(errors, file);
+  }
+
+  if (!errors.length) {
+    assertIncludes(errors, "RUN_HYPERSCALE_SQL_2026-06-27.sql", "claim_pending_payment_orders_sharded", "sharded scanner claim function");
+    assertIncludes(errors, "RUN_HYPERSCALE_SQL_2026-06-27.sql", "payment_scanner_heartbeats", "scanner heartbeat table");
+    assertIncludes(errors, "VERIFY_HYPERSCALE_SQL_2026-06-27.sql", "function_claim_pending_payment_orders_sharded", "sharded claim verify");
+    assertIncludes(errors, "SCALE_CONTRACT_AUDIT_1_5M.sql", "wallet_capacity_available_1_5m", "wallet capacity contract");
+    assertIncludes(errors, "SCANNER_SHARD_COVERAGE_AUDIT_1_5M.sql", "scanner_shard_coverage_live", "scanner shard coverage");
+    assertIncludes(errors, "PAYMENT_BACKLOG_FAST_AUDIT_1_5M.sql", "pending_orders_with_wallet", "payment backlog audit");
+    assertIncludes(errors, "FINAL_GATE_SQL_VERIFY_1_5M.sql", "wallet_capacity_ready", "final SQL launch gate");
+    assertIncludes(errors, "IMPORT_PROGRESS_TABLE_1_5M.sql", "wallet_import_batches", "wallet import progress table");
+    assertIncludes(errors, "FINAL_OPERATIONAL_GATE_1_5M.sql", "vidipay_operational_gate_1_5m", "final operational gate");
+    assertIncludes(errors, "WALLET_IMPORT_MANIFEST_AUDIT_1_5M.sql", "wallet_import_batches_summary", "wallet import manifest audit");
+    assertIncludes(errors, "SCANNER_WORKER_OPERATIONS_AUDIT_1_5M.sql", "scanner_live_summary", "scanner worker operations audit");
+    assertIncludes(errors, "CONTROL_TOWER_SQL_AUDIT_1_5M.sql", "wallet_capacity_ready", "control tower SQL audit");
+    assertIncludes(errors, "WALLET_ASSIGNMENT_INTEGRITY_AUDIT_1_5M.sql", "multi_wallet_users", "wallet assignment integrity audit");
+    assertIncludes(errors, "PAYMENT_ORDER_TO_WALLET_LINK_AUDIT_1_5M.sql", "pending_order_wallet_status", "payment order wallet link audit");
+    assertIncludes(errors, "TON_DEPOSIT_REFUND_AUDIT_1_5M.sql", "vidipay_ton_refund_audit_1_5m", "TON deposit refund audit");
+    assertIncludes(errors, "CLOSEOUT_FINAL_SQL_AUDIT_1_5M.sql", "wallet_capacity_ready", "closeout final SQL audit");
+    assertIncludes(errors, "INFRA_AUTOPILOT_SQL_GATE_1_5M.sql", "vidipay_infra_autopilot_gate_1_5m", "infra autopilot SQL gate");
+    assertIncludes(errors, "WALLET_PUBLIC_IMPORT_STAGING_TEMPLATE_1_5M.sql", "wallet_import_batches", "public wallet import staging table");
+    assertIncludes(errors, "COPY_THIS_FIRST_FIX_SHARD_COLUMNS_1_5M.sql", "shard_index", "emergency shard column fix");
+    assertIncludes(errors, "RUN_SQL_IN_THIS_ORDER_1_5M.txt", "POST_DEPLOY_VERIFY_1_5M.sql", "post deploy verify order");
+    assertIncludes(errors, "RUN_SQL_IN_THIS_ORDER_1_5M.txt", "SCALE_CONTRACT_AUDIT_1_5M.sql", "scale contract run order");
+  }
+
+  if (errors.length) {
+    console.error("SQL PACKAGE CHECK FAILED");
+    for (const error of errors) console.error(`- ${error}`);
+    process.exit(1);
+  }
+
+  console.log("SQL PACKAGE CHECK OK");
+  console.log(`sql_dir=${sqlDir}`);
 }
 
 main();

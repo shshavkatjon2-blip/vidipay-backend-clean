@@ -1,87 +1,199 @@
 const fs = require("fs");
 const path = require("path");
+const crypto = require("crypto");
+const { WalletContractV4 } = require("@ton/ton");
+const { mnemonicNew, mnemonicToPrivateKey, keyPairFromSeed } = require("@ton/crypto");
 
-const root = path.resolve(__dirname, "..");
-const packageRoot = path.resolve(root, "..");
-const outDir = path.join(packageRoot, "render-blueprints");
-const envDir = path.join(packageRoot, "env", "scanner-workers");
+function readArg(name, fallback = "") {
+  const prefix = `--${name}=`;
+  const direct = process.argv.find((item) => item.startsWith(prefix));
+  if (direct) return direct.slice(prefix.length);
 
-function write(file, text) {
-  fs.mkdirSync(path.dirname(file), { recursive: true });
-  fs.writeFileSync(file, text.endsWith("\n") ? text : `${text}\n`, "utf8");
-  console.log(path.relative(packageRoot, file).replace(/\\/g, "/"));
+  const index = process.argv.indexOf(`--${name}`);
+  if (index >= 0 && process.argv[index + 1]) return process.argv[index + 1];
+  return fallback;
 }
 
-function workerService(index, shardCount) {
-  const suffix = String(index).padStart(3, "0");
-  return `  - type: worker
-    name: vidipay-scanner-${suffix}
-    runtime: node
-    plan: pro
-    buildCommand: node render-build-fix.cjs && npm install --omit=dev --no-audit --no-fund
-    startCommand: npm run start:scanner
-    envVars:
-      - key: NODE_ENV
-        value: production
-      - key: WORKER_MODE
-        value: scanner
-      - key: PAYMENT_SCANNER_ENABLED
-        value: true
-      - key: PAYMENT_SCANNER_WORKER_ID
-        value: vidipay-scanner-${suffix}
-      - key: PAYMENT_SCANNER_SHARD_COUNT
-        value: ${shardCount}
-      - key: PAYMENT_SCANNER_SHARD_INDEX
-        value: ${index}
-      - key: REDIS_SCANNER_LOCKS_ENABLED
-        value: true
-      - key: REDIS_URL
-        sync: false
-      - key: SUPABASE_URL
-        sync: false
-      - key: SUPABASE_SERVICE_ROLE_KEY
-        sync: false
-      - key: TONAPI_KEY
-        sync: false
-      - key: TONAPI_BASE_URL
-        value: https://tonapi.io
-`;
+function normalizeCount(value) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed < 1) return 100000;
+  return Math.min(3000000, Math.floor(parsed));
 }
 
-function envFile(index, shardCount) {
-  const suffix = String(index).padStart(3, "0");
-  return [
-    "NODE_ENV=production",
-    "WORKER_MODE=scanner",
-    "PAYMENT_SCANNER_ENABLED=true",
-    `PAYMENT_SCANNER_WORKER_ID=vidipay-scanner-${suffix}`,
-    `PAYMENT_SCANNER_SHARD_COUNT=${shardCount}`,
-    `PAYMENT_SCANNER_SHARD_INDEX=${index}`,
-    "PAYMENT_SCAN_INTERVAL_MS=3000",
-    "PAYMENT_SCAN_BATCH_SIZE=500",
-    "PAYMENT_SCAN_CONCURRENCY=32",
-    "PAYMENT_SCAN_JITTER_MS=2500",
-    "PAYMENT_SCAN_ORDER_DELAY_MS=10",
-    "REDIS_SCANNER_LOCKS_ENABLED=true",
-    "REDIS_URL=",
-    "SUPABASE_URL=",
-    "SUPABASE_SERVICE_ROLE_KEY=",
-    "TONAPI_KEY=",
-    "TONAPI_BASE_URL=https://tonapi.io"
+function normalizeBatchSize(value) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed < 1) return 5000;
+  return Math.min(10000, Math.floor(parsed));
+}
+
+function sanitizeLabel(index, width) {
+  return `wallet-${String(index + 1).padStart(width, "0")}`;
+}
+
+function sqlEscape(value) {
+  return String(value).replace(/'/g, "''");
+}
+
+function csvCell(value) {
+  return `"${String(value).replace(/"/g, "\"\"")}"`;
+}
+
+function writeBatchSql(outDir, batchNumber, rows) {
+  const filePath = path.join(outDir, `public-addresses-${String(batchNumber).padStart(5, "0")}.sql`);
+  const sql = [
+    "insert into payment_wallets (network, token, address) values",
+    rows.join(",\n"),
+    "on conflict (address) do nothing;"
   ].join("\n");
+  fs.writeFileSync(filePath, sql, "utf8");
+  return filePath;
 }
 
-function generate(shardCount) {
-  const services = ["services:"];
-  for (let index = 0; index < shardCount; index += 1) {
-    services.push(workerService(index, shardCount));
-    write(path.join(envDir, `${shardCount}-workers`, `scanner-${String(index).padStart(3, "0")}.env`), envFile(index, shardCount));
+function shardDirForIndex(outDir, index) {
+  const shardStart = Math.floor(index / 10000) * 10000 + 1;
+  const shardEnd = shardStart + 9999;
+  const shardName = `${String(shardStart).padStart(7, "0")}-${String(shardEnd).padStart(7, "0")}`;
+  const dir = path.join(outDir, "private-keys", shardName);
+  fs.mkdirSync(dir, { recursive: true });
+  return dir;
+}
+
+async function buildWallet(index, options) {
+  const label = sanitizeLabel(index, options.labelWidth);
+  let mnemonic = null;
+  let seedHex = "";
+  let keyPair = null;
+
+  if (options.keyFormat === "seed") {
+    const seed = crypto.randomBytes(32);
+    seedHex = seed.toString("hex");
+    keyPair = keyPairFromSeed(seed);
+  } else {
+    mnemonic = await mnemonicNew(24);
+    keyPair = await mnemonicToPrivateKey(mnemonic);
   }
-  write(path.join(outDir, `scanner-workers-${shardCount}.autopilot.yaml`), services.join("\n"));
+
+  const wallet = WalletContractV4.create({
+    workchain: options.workchain,
+    publicKey: keyPair.publicKey
+  });
+
+  const address = wallet.address.toString({
+    urlSafe: true,
+    bounceable: true,
+    testOnly: options.network === "testnet"
+  });
+  const rawAddress = wallet.address.toRawString();
+
+  return {
+    label,
+    address,
+    rawAddress,
+    payload: {
+      label,
+      network: options.network,
+      workchain: options.workchain,
+      address,
+      raw_address: rawAddress,
+      key_format: options.keyFormat,
+      ...(mnemonic ? { mnemonic: mnemonic.join(" ") } : {}),
+      ...(seedHex ? { seed_hex: seedHex } : {}),
+      public_key_hex: Buffer.from(keyPair.publicKey).toString("hex")
+    }
+  };
 }
 
-function main() {
-  for (const shardCount of [4, 16, 64]) generate(shardCount);
+async function main() {
+  const count = normalizeCount(readArg("count", "100000"));
+  const sqlBatchSize = normalizeBatchSize(readArg("sql-batch-size", "5000"));
+  const keyFormat = String(readArg("key-format", "mnemonic")).trim().toLowerCase() === "seed" ? "seed" : "mnemonic";
+  const workchain = Number(readArg("workchain", "0")) || 0;
+  const network = String(readArg("network", "mainnet")).trim().toLowerCase() === "testnet" ? "testnet" : "mainnet";
+  const outDir = path.resolve(readArg("out", path.join(process.cwd(), "ton-wallet-pool-large")));
+  const labelWidth = Math.max(7, String(count).length);
+
+  fs.mkdirSync(outDir, { recursive: true });
+
+  const csvStream = fs.createWriteStream(path.join(outDir, "wallets-summary.csv"), { encoding: "utf8" });
+  const manifestStream = fs.createWriteStream(path.join(outDir, "wallet-manifest.public.jsonl"), { encoding: "utf8" });
+  csvStream.write(["label", "address", "raw_address", "network", "workchain"].map(csvCell).join(",") + "\n");
+
+  let batchRows = [];
+  let batchNumber = 1;
+  let writtenBatchCount = 0;
+
+  for (let index = 0; index < count; index += 1) {
+    const wallet = await buildWallet(index, { labelWidth, keyFormat, workchain, network });
+    const shardDir = shardDirForIndex(outDir, index);
+    const walletFilePath = path.join(shardDir, `${wallet.label}.json`);
+
+    fs.writeFileSync(walletFilePath, JSON.stringify(wallet.payload, null, 2), "utf8");
+
+    batchRows.push(`('TON', 'TON', '${sqlEscape(wallet.address)}')`);
+    csvStream.write([wallet.label, wallet.address, wallet.rawAddress, network, String(workchain)].map(csvCell).join(",") + "\n");
+    manifestStream.write(JSON.stringify({
+      label: wallet.label,
+      address: wallet.address,
+      raw_address: wallet.rawAddress,
+      wallet_file: path.relative(outDir, walletFilePath).replace(/\\/g, "/")
+    }) + "\n");
+
+    if (batchRows.length >= sqlBatchSize) {
+      writeBatchSql(outDir, batchNumber, batchRows);
+      batchRows = [];
+      batchNumber += 1;
+      writtenBatchCount += 1;
+    }
+
+    if ((index + 1) % 10000 === 0) {
+      console.log(`Generated ${index + 1}/${count} wallets...`);
+    }
+  }
+
+  if (batchRows.length) {
+    writeBatchSql(outDir, batchNumber, batchRows);
+    writtenBatchCount += 1;
+  }
+
+  csvStream.end();
+  manifestStream.end();
+
+  const envSnippet = [
+    "TON_SIGNER_ENABLED=true",
+    `TON_SIGNER_NETWORK=${network}`,
+    `TON_SIGNER_KEYS_DIR=${path.join(outDir, "private-keys")}`,
+    "TON_RPC_ENDPOINT=",
+    "TON_RPC_API_KEY=",
+    "TON_PAYOUT_GAS_RESERVE=0.10",
+    "TON_PAYOUT_BODY=VidiPay activation payout"
+  ].join("\n");
+
+  const readme = [
+    "VidiPay TON large wallet pool",
+    "",
+    `Wallet count: ${count}`,
+    `Network: ${network}`,
+    `Workchain: ${workchain}`,
+    `Key format: ${keyFormat}`,
+    `SQL batch size: ${sqlBatchSize}`,
+    `SQL batch files: ${writtenBatchCount}`,
+    "",
+    "Important:",
+    "- Do not upload private-keys to GitHub, Supabase, Render, or frontend hosting.",
+    "- Keep private-keys offline or on a protected signer machine only.",
+    "- Import only public-addresses-00001.sql and later SQL files into Supabase.",
+    "- wallet-manifest.public.jsonl contains public metadata only."
+  ].join("\n");
+
+  fs.writeFileSync(path.join(outDir, "signer-env-snippet.txt"), envSnippet, "utf8");
+  fs.writeFileSync(path.join(outDir, "README.txt"), readme, "utf8");
+
+  console.log(`Generated ${count} TON wallets.`);
+  console.log(`Secure folder: ${outDir}`);
+  console.log(`SQL batch files: ${writtenBatchCount}`);
 }
 
-main();
+main().catch((error) => {
+  console.error(error.message || error);
+  process.exit(1);
+});

@@ -1,67 +1,73 @@
+const fs = require("fs");
 const path = require("path");
-const { spawnSync } = require("child_process");
 
-function readArg(name, fallback = "") {
-  const prefix = `--${name}=`;
-  const direct = process.argv.find((item) => item.startsWith(prefix));
-  if (direct) return direct.slice(prefix.length);
-  const index = process.argv.indexOf(`--${name}`);
-  if (index >= 0 && process.argv[index + 1]) return process.argv[index + 1];
-  return fallback;
+const root = path.resolve(__dirname, "..");
+const packageRoot = path.resolve(root, "..");
+const outputDir = fs.existsSync(path.join(packageRoot, "ops")) ? path.join(packageRoot, "ops") : root;
+const outputFile = path.join(outputDir, "render-env-bundle-1_5m.txt");
+
+function envBlock(title, lines) {
+  return [`# ===== ${title} =====`, ...lines, ""].join("\n");
 }
 
-function readNumber(name, fallback, min, max) {
-  const value = Number(readArg(name, process.env[name.toUpperCase().replace(/-/g, "_")] || fallback));
-  if (!Number.isFinite(value)) return fallback;
-  return Math.max(min, Math.min(max, Math.floor(value)));
+function scannerBlock(count, index) {
+  return [
+    `# scanner-${count}-${index}`,
+    "WORKER_MODE=scanner",
+    "PAYMENT_SCANNER_ENABLED=true",
+    `PAYMENT_SCANNER_WORKER_ID=scanner-${count}-${index}`,
+    `PAYMENT_SCANNER_SHARD_COUNT=${count}`,
+    `PAYMENT_SCANNER_SHARD_INDEX=${index}`,
+    "PAYMENT_SCAN_INTERVAL_MS=3000",
+    "PAYMENT_SCAN_BATCH_SIZE=500",
+    "PAYMENT_SCAN_CONCURRENCY=32",
+    "PAYMENT_SCAN_JITTER_MS=2500",
+    "PAYMENT_SCAN_ORDER_DELAY_MS=10",
+    "PAYMENT_SCAN_MAX_ERRORS_PER_RUN=500",
+    "PAYMENT_SCANNER_HEARTBEAT_READ_LIMIT=512",
+    "REDIS_SCANNER_LOCKS_ENABLED=true",
+    "REDIS_SCANNER_LOCKS_REQUIRED=false",
+    "REDIS_SCANNER_LOCK_TTL_MS=60000",
+    "SUPABASE_URL=",
+    "SUPABASE_SERVICE_ROLE_KEY=",
+    "TONAPI_BASE_URL=https://tonapi.io",
+    "TONAPI_KEY="
+  ];
 }
 
 function main() {
-  const confirm = String(readArg("confirm-private-output", "")).trim().toLowerCase();
-  if (confirm !== "yes") {
-    console.error("Refusing to generate private wallet keys without --confirm-private-output=yes");
-    console.error("Private keys must never be uploaded to GitHub, Render, Supabase, or frontend hosting.");
-    process.exit(2);
+  const sections = [];
+  sections.push(envBlock("WEB SERVICE API", [
+    "WORKER_MODE=api",
+    "PAYMENT_SCANNER_ENABLED=false",
+    "RATE_LIMIT_BACKEND=redis",
+    "REDIS_URL=",
+    "REDIS_DEEP_CHECK_ENABLED=true",
+    "PAYMENT_SCANNER_HEARTBEAT_READ_LIMIT=512",
+    "OPS_SNAPSHOT_CACHE_TTL_MS=2000",
+    "FINAL_GATE_MIN_SCANNER_WORKERS=4",
+    "CAPACITY_TARGET_USERS=1500000",
+    "SUPABASE_URL=",
+    "SUPABASE_SERVICE_ROLE_KEY=",
+    "ADMIN_TOKEN=",
+    "BOT_TOKEN=",
+    "TELEGRAM_WEBHOOK_SECRET=",
+    "TONAPI_BASE_URL=https://tonapi.io",
+    "TONAPI_KEY=",
+    "TON_AUTO_PAYOUT_ENABLED=true",
+    "TON_SIGNER_ENABLED=true",
+    "TON_SIGNER_KEYS_DIR=",
+    "TON_RPC_ENDPOINT=",
+    "TON_RPC_API_KEY="
+  ]));
+  for (const count of [4, 16]) {
+    for (let index = 0; index < count; index += 1) {
+      sections.push(envBlock(`SCANNER ${count} SHARDS / INDEX ${index}`, scannerBlock(count, index)));
+    }
   }
-
-  const target = readNumber("target", 1500000, 1, 3000000);
-  const currentAvailable = readNumber("current-available", 100001, 0, 3000000);
-  const buffer = readNumber("buffer", 0, 0, 500000);
-  const count = Math.max(0, target + buffer - currentAvailable);
-  const out = path.resolve(readArg("out", path.join(process.cwd(), "ton-wallet-topup-to-1_5m")));
-  const network = String(readArg("network", "mainnet")).trim().toLowerCase() === "testnet" ? "testnet" : "mainnet";
-  const keyFormat = String(readArg("key-format", "mnemonic")).trim().toLowerCase() === "seed" ? "seed" : "mnemonic";
-  const sqlBatchSize = readNumber("sql-batch-size", 5000, 1, 10000);
-
-  if (count <= 0) {
-    console.log("No wallet top-up needed.");
-    console.log(`target=${target}`);
-    console.log(`current_available=${currentAvailable}`);
-    return;
-  }
-
-  console.log("=== VidiPay 1.5M wallet top-up generation ===");
-  console.log(`target=${target}`);
-  console.log(`current_available=${currentAvailable}`);
-  console.log(`buffer=${buffer}`);
-  console.log(`wallets_to_generate=${count}`);
-  console.log(`secure_output=${out}`);
-  console.log("IMPORTANT: Keep private-keys folder offline/private.");
-
-  const generator = path.resolve(__dirname, "generate-ton-wallet-pool-large.js");
-  const result = spawnSync(process.execPath, [
-    generator,
-    `--count=${count}`,
-    `--out=${out}`,
-    `--network=${network}`,
-    `--key-format=${keyFormat}`,
-    `--sql-batch-size=${sqlBatchSize}`
-  ], {
-    stdio: "inherit"
-  });
-
-  if (result.error) throw result.error;
-  process.exit(result.status || 0);
+  fs.mkdirSync(outputDir, { recursive: true });
+  fs.writeFileSync(outputFile, `${sections.join("\n")}\n`, "utf8");
+  console.log(`render_env_bundle=${outputFile}`);
 }
 
 main();

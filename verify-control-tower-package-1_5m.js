@@ -2,57 +2,71 @@ const fs = require("fs");
 const path = require("path");
 
 const root = path.resolve(__dirname, "..");
-const server = fs.readFileSync(path.join(root, "server.js"), "utf8");
+const packageRoot = path.resolve(root, "..");
 
-const required = [
-  ["BACKEND_VERSION", "v1.8.2-infra-autopilot-20260628"],
-  ["OPS_DB_AUDIT_TIMEOUT_MS", "OPS_DB_AUDIT_TIMEOUT_MS"],
-  ["SCALE_AUDIT_COUNT_MODE", "SCALE_AUDIT_COUNT_MODE"],
-  ["/ops/scanner-shards", 'app.get("/ops/scanner-shards"'],
-  ["/ops/scanner-backlog", 'app.get("/ops/scanner-backlog"'],
-  ["/ops/wallet-capacity", 'app.get("/ops/wallet-capacity"'],
-  ["/ops/wallet-import-plan", 'app.get("/ops/wallet-import-plan"'],
-  ["/ops/redis", 'app.get("/ops/redis"'],
-  ["/ops/redis-deep", 'app.get("/ops/redis-deep"'],
-  ["/ops/ton-signer", 'app.get("/ops/ton-signer"'],
-  ["/ops/final-gate", 'app.get("/ops/final-gate"'],
-  ["/ops/launch-checklist", 'app.get("/ops/launch-checklist"'],
-  ["/ops/snapshot", 'app.get("/ops/snapshot"'],
-  ["/ops/control-tower", 'app.get("/ops/control-tower"'],
-  ["/ops/env-contract", 'app.get("/ops/env-contract"'],
-  ["/ops/scanner-worker-plan", 'app.get("/ops/scanner-worker-plan"'],
-  ["/ops/blocker-actions", 'app.get("/ops/blocker-actions"'],
-  ["/ops/infra-autopilot", 'app.get("/ops/infra-autopilot"'],
-  ["/ops/scale-contract", 'app.get("/ops/scale-contract"'],
-  ["redis health helper", "checkRedisHealth"],
-  ["redis deep health helper", "checkRedisDeepHealth"],
-  ["scanner distributed lock helper", "acquireScannerDistributedLock"],
-  ["ton signer readiness helper", "buildTonSignerReadinessReport"],
-  ["1.5M signer required flag", "REQUIRE_TON_AUTO_PAYOUT_FOR_1_5M"],
-  ["final launch gate helper", "buildFinalLaunchGate"],
-  ["wallet import plan helper", "buildWalletImportPlan"],
-  ["env contract helper", "buildEnvContract"],
-  ["scanner worker plan helper", "buildScannerWorkerPlan"],
-  ["blocker actions helper", "buildBlockerActions"],
-  ["ops snapshot helper", "buildOpsSnapshot"],
-  ["wallet capacity helper", "buildWalletCapacityReport"],
-  ["scanner backlog helper", "buildScannerBacklogReport"],
-  ["scanner shard helper", "buildScannerShardReport"],
-  ["scale contract helper", "buildScaleContract"],
-  ["ops timeout helper", "withOpsTimeout"],
-  ["planned count mode", "planned"]
-];
-
-const errors = [];
-for (const [label, pattern] of required) {
-  if (!server.includes(pattern)) errors.push(`server.js missing ${label}`);
+function existsRoot(file) {
+  return fs.existsSync(path.join(root, file));
 }
 
-if (errors.length) {
-  console.error("SCALE CONTRACT CHECK FAILED");
-  for (const error of errors) console.error(`- ${error}`);
-  process.exit(1);
+function existsPackage(file) {
+  return fs.existsSync(path.join(packageRoot, file));
 }
 
-console.log("SCALE CONTRACT CHECK OK");
-console.log("endpoints=/ops/scanner-shards,/ops/scanner-backlog,/ops/wallet-capacity,/ops/wallet-import-plan,/ops/redis,/ops/redis-deep,/ops/ton-signer,/ops/final-gate,/ops/launch-checklist,/ops/snapshot,/ops/control-tower,/ops/env-contract,/ops/scanner-worker-plan,/ops/blocker-actions,/ops/infra-autopilot,/ops/scale-contract");
+function readRoot(file) {
+  return fs.readFileSync(path.join(root, file), "utf8");
+}
+
+function fail(errors, message) {
+  errors.push(message);
+}
+
+function assertIncludes(errors, file, pattern, label) {
+  if (!existsRoot(file)) return fail(errors, `Missing ${file}`);
+  if (!readRoot(file).includes(pattern)) fail(errors, `${file} missing ${label || pattern}`);
+}
+
+function main() {
+  const errors = [];
+
+  for (const file of [
+    "server.js",
+    "scripts/verify-control-tower-package-1_5m.js",
+    "scripts/diagnose-live-control-tower-1_5m.js",
+    "scripts/generate-render-env-bundle-1_5m.js"
+  ]) {
+    if (!existsRoot(file)) fail(errors, `Missing ${file}`);
+  }
+
+  for (const file of [
+    "sql/CONTROL_TOWER_SQL_AUDIT_1_5M.sql",
+    "ops/CONTROL_TOWER_RUNBOOK_1_5M.md",
+    "env/CONTROL_TOWER_ENV_1_5M.env"
+  ]) {
+    if (!existsPackage(file)) fail(errors, `Missing package file ${file}`);
+  }
+
+  assertIncludes(errors, "server.js", "PAYMENT_SCANNER_HEARTBEAT_READ_LIMIT", "scanner heartbeat read limit");
+  assertIncludes(errors, "server.js", "OPS_SNAPSHOT_CACHE_TTL_MS", "ops snapshot cache");
+  assertIncludes(errors, "server.js", "buildEnvContract", "env contract helper");
+  assertIncludes(errors, "server.js", "buildScannerWorkerPlan", "scanner worker plan helper");
+  assertIncludes(errors, "server.js", "buildBlockerActions", "blocker actions helper");
+  assertIncludes(errors, "server.js", "buildOpsSnapshot", "ops snapshot helper");
+  assertIncludes(errors, "server.js", 'app.get("/ops/snapshot"', "/ops/snapshot endpoint");
+  assertIncludes(errors, "server.js", 'app.get("/ops/control-tower"', "/ops/control-tower endpoint");
+  assertIncludes(errors, "server.js", 'app.get("/ops/env-contract"', "/ops/env-contract endpoint");
+  assertIncludes(errors, "server.js", 'app.get("/ops/scanner-worker-plan"', "/ops/scanner-worker-plan endpoint");
+  assertIncludes(errors, "server.js", 'app.get("/ops/blocker-actions"', "/ops/blocker-actions endpoint");
+  assertIncludes(errors, "package.json", "\"verify:control-tower\"", "control tower verify script");
+  assertIncludes(errors, "package.json", "\"diagnose:live\"", "live diagnosis script");
+  assertIncludes(errors, "package.json", "\"ops:render-env-bundle\"", "render env bundle script");
+
+  if (errors.length) {
+    console.error("CONTROL TOWER PACKAGE CHECK FAILED");
+    for (const error of errors) console.error(`- ${error}`);
+    process.exit(1);
+  }
+
+  console.log("CONTROL TOWER PACKAGE CHECK OK");
+}
+
+main();
