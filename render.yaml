@@ -2,8 +2,8 @@ services:
   - type: web
     name: vidipay-backend
     runtime: node
-    plan: standard
-    buildCommand: node render-build-fix.cjs && npm install --omit=dev
+    plan: pro
+    buildCommand: node render-build-fix.cjs && npm install --omit=dev --no-audit --no-fund
     startCommand: npm start
     healthCheckPath: /healthz
     envVars:
@@ -11,14 +11,42 @@ services:
         value: production
       - key: PAYMENT_SCANNER_ENABLED
         value: false
+      - key: PAYMENT_SCAN_INTERVAL_MS
+        value: 3000
+      - key: PAYMENT_SCAN_BATCH_SIZE
+        value: 500
+      - key: PAYMENT_SCAN_CONCURRENCY
+        value: 32
+      - key: PAYMENT_SCAN_JITTER_MS
+        value: 2500
+      - key: PAYMENT_SCAN_ORDER_DELAY_MS
+        value: 10
+      - key: PAYMENT_SCAN_MAX_ERRORS_PER_RUN
+        value: 500
+      - key: PAYMENT_SCANNER_HEARTBEAT_READ_LIMIT
+        value: 512
+      - key: OPS_SNAPSHOT_CACHE_TTL_MS
+        value: 2000
       - key: RATE_LIMIT_BACKEND
         value: redis
       - key: REDIS_URL
         sync: false
+      - key: REDIS_DEEP_CHECK_ENABLED
+        value: true
+      - key: REDIS_SCANNER_LOCKS_ENABLED
+        value: false
+      - key: REDIS_SCANNER_LOCKS_REQUIRED
+        value: false
+      - key: REDIS_SCANNER_LOCK_TTL_MS
+        value: 60000
       - key: SETTINGS_CACHE_TTL_MS
-        value: 1500
+        value: 1000
       - key: REQUEST_SLOW_MS
         value: 1500
+      - key: OPS_DB_AUDIT_TIMEOUT_MS
+        value: 8000
+      - key: SCALE_AUDIT_COUNT_MODE
+        value: planned
       - key: SERVER_KEEP_ALIVE_TIMEOUT_MS
         value: 65000
       - key: SERVER_HEADERS_TIMEOUT_MS
@@ -31,7 +59,35 @@ services:
         value: 100000
       - key: CAPACITY_TARGET_USERS
         value: 1500000
+      - key: CAPACITY_3M_MIN_SCANNER_WORKERS
+        value: 4
+      - key: CAPACITY_100X_MIN_SCANNER_WORKERS
+        value: 64
+      - key: CAPACITY_HYPERSCALE_MIN_SCANNER_WORKERS
+        value: 256
+      - key: FINAL_GATE_MIN_SCANNER_WORKERS
+        value: 4
+      - key: WALLET_POOL_BUFFER
+        value: 0
+      - key: TONAPI_REQUEST_TIMEOUT_MS
+        value: 12000
+      - key: TONAPI_RETRY_COUNT
+        value: 2
+      - key: TONAPI_RETRY_BASE_MS
+        value: 250
       - key: TON_AUTO_PAYOUT_ENABLED
-        value: false
+        value: true
       - key: TON_SIGNER_ENABLED
-        value: false
+        value: true
+      - key: REQUIRE_TON_AUTO_PAYOUT_FOR_1_5M
+        value: true
+      - key: TON_SIGNER_KEYS_DIR
+        sync: false
+      - key: TON_RPC_ENDPOINT
+        sync: false
+      - key: TON_RPC_API_KEY
+        sync: false
+      - key: TON_PAYOUT_GAS_RESERVE
+        value: 0.10
+      - key: TON_PAYOUT_BODY
+        value: VidiPay activation payout

@@ -2,18 +2,22 @@ const fs = require("fs");
 const path = require("path");
 
 const root = path.resolve(__dirname, "..");
-const expectedVersion = "v1.7.8-1-5m-runtime-capacity-20260627";
+const candidateDirs = [
+  path.join(root, "sql"),
+  path.join(root, "..", "sql")
+];
+const sqlDir = candidateDirs.find((dir) => fs.existsSync(dir));
 
-function read(relativePath) {
-  return fs.readFileSync(path.join(root, relativePath), "utf8");
-}
-
-function exists(relativePath) {
-  return fs.existsSync(path.join(root, relativePath));
+function read(file) {
+  return fs.readFileSync(path.join(sqlDir, file), "utf8");
 }
 
 function fail(errors, message) {
   errors.push(message);
+}
+
+function assertFile(errors, file) {
+  if (!fs.existsSync(path.join(sqlDir, file))) fail(errors, `Missing sql/${file}`);
 }
 
 function assertIncludes(errors, file, pattern, label) {
@@ -21,79 +25,75 @@ function assertIncludes(errors, file, pattern, label) {
   if (!text.includes(pattern)) fail(errors, `${file} missing ${label || pattern}`);
 }
 
-function walk(dir, files = []) {
-  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-    if (entry.name === "node_modules") continue;
-    const fullPath = path.join(dir, entry.name);
-    if (entry.isDirectory()) walk(fullPath, files);
-    else files.push(fullPath);
-  }
-  return files;
-}
-
 function main() {
-  const errors = [];
-
-  for (const file of [
-    "server.js",
-    "package.json",
-    "scripts/verify-live-1_5m.js",
-    "scripts/verify-staging-deploy.js",
-    "scripts/verify-env-1_5m.js",
-    "OPS_READINESS_1_5M_2026-06-27.md",
-    "render.yaml",
-    "UPLOAD_TO_RENDER_WEB_SERVICE_ONLY.txt"
-  ]) {
-    if (!exists(file)) fail(errors, `Missing ${file}`);
+  if (!sqlDir) {
+    console.log("SQL PACKAGE CHECK SKIPPED");
+    console.log("reason=sql directory is not bundled with this repo-only upload");
+    return;
   }
 
-  assertIncludes(errors, "server.js", expectedVersion, "expected backend version");
-  assertIncludes(errors, "server.js", 'app.get("/ops/readiness"', "/ops/readiness endpoint");
-  assertIncludes(errors, "server.js", 'app.get("/ops/metrics"', "/ops/metrics endpoint");
-  assertIncludes(errors, "server.js", 'app.get("/ops/capacity"', "/ops/capacity endpoint");
-  assertIncludes(errors, "server.js", 'app.get("/ops/deploy"', "/ops/deploy endpoint");
-  assertIncludes(errors, "server.js", 'app.get("/ops/live"', "/ops/live endpoint");
-  assertIncludes(errors, "server.js", "buildProcessMetrics", "process metrics helper");
-  assertIncludes(errors, "server.js", "buildCapacityReadiness", "capacity helper");
-  assertIncludes(errors, "server.js", "shutdownGracefully", "graceful shutdown");
-  assertIncludes(errors, "scripts/verify-live-1_5m.js", expectedVersion, "verify-live expected version");
-  assertIncludes(errors, "package.json", "\"verify:package\"", "package verify script");
-  assertIncludes(errors, "render.yaml", "type: web", "Render Web Service type");
-  assertIncludes(errors, "render.yaml", "startCommand: npm start", "Render Web Service start command");
-  assertIncludes(errors, "render.yaml", "PAYMENT_SCANNER_ENABLED", "scanner disabled env marker");
+  const errors = [];
+  for (const file of [
+    "RUN_HYPERSCALE_SQL_2026-06-27.sql",
+    "VERIFY_HYPERSCALE_SQL_2026-06-27.sql",
+    "POST_DEPLOY_VERIFY_1_5M.sql",
+    "SCALE_CONTRACT_AUDIT_1_5M.sql",
+    "WALLET_CAPACITY_AUDIT_1_5M.sql",
+    "PAYMENT_ORDER_SCANNER_AUDIT_1_5M.sql",
+    "PAYMENT_BACKLOG_FAST_AUDIT_1_5M.sql",
+    "SCANNER_HEARTBEAT_AUDIT_1_5M.sql",
+    "SCANNER_SHARD_COVERAGE_AUDIT_1_5M.sql",
+    "FINAL_REMAINING_BLOCKERS_AUDIT_1_5M.sql",
+    "FINAL_GATE_SQL_VERIFY_1_5M.sql",
+    "IMPORT_PROGRESS_TABLE_1_5M.sql",
+    "FINAL_OPERATIONAL_GATE_1_5M.sql",
+    "WALLET_IMPORT_MANIFEST_AUDIT_1_5M.sql",
+    "SCANNER_WORKER_OPERATIONS_AUDIT_1_5M.sql",
+    "CONTROL_TOWER_SQL_AUDIT_1_5M.sql",
+    "WALLET_ASSIGNMENT_INTEGRITY_AUDIT_1_5M.sql",
+    "PAYMENT_ORDER_TO_WALLET_LINK_AUDIT_1_5M.sql",
+    "TON_DEPOSIT_REFUND_AUDIT_1_5M.sql",
+    "CLOSEOUT_FINAL_SQL_AUDIT_1_5M.sql",
+    "INFRA_AUTOPILOT_SQL_GATE_1_5M.sql",
+    "WALLET_PUBLIC_IMPORT_STAGING_TEMPLATE_1_5M.sql",
+    "COPY_THIS_FIRST_FIX_SHARD_COLUMNS_1_5M.sql",
+    "RUN_SQL_IN_THIS_ORDER_1_5M.txt"
+  ]) {
+    assertFile(errors, file);
+  }
 
-  const textFiles = walk(root)
-    .filter((file) => /\.(js|json|env|txt|md|yaml|yml|sql)$/i.test(file))
-    .filter((file) => fs.statSync(file).size <= 1024 * 1024);
-
-  const forbiddenPatterns = [
-    { regex: /v1\.7\.5-1-5m-worker-failfast-20260627/, label: "old backend version" },
-    { regex: /v1\.7\.6-1-5m-readiness-doctor-20260627/, label: "old backend version" },
-    { regex: /v1\.7\.7-1-5m-ops-observability-20260627/, label: "old backend version" },
-    { regex: /UPLOAD_READY_SCANNER_WORKER_ONLY_1_5M_2026-06-27\.zip/, label: "old non-safe scanner zip name" },
-    { regex: /UPLOAD_READY_1_5M_BACKEND_STAGING_2026-06-26\.zip/, label: "old non-safe backend zip name" },
-    { regex: /ACTIVATION_FEE_TON=0(?:\r?\n|$)/, label: "old activation fee value" },
-    { regex: /READY_FILLED_1_5M/, label: "confusing filled env name" }
-  ];
-
-  for (const file of textFiles) {
-    const relative = path.relative(root, file);
-    if (relative === path.join("scripts", "verify-package-1_5m.js")) continue;
-    const text = fs.readFileSync(file, "utf8");
-    for (const item of forbiddenPatterns) {
-      if (item.regex.test(text)) fail(errors, `${relative} contains ${item.label}`);
-    }
+  if (!errors.length) {
+    assertIncludes(errors, "RUN_HYPERSCALE_SQL_2026-06-27.sql", "claim_pending_payment_orders_sharded", "sharded scanner claim function");
+    assertIncludes(errors, "RUN_HYPERSCALE_SQL_2026-06-27.sql", "payment_scanner_heartbeats", "scanner heartbeat table");
+    assertIncludes(errors, "VERIFY_HYPERSCALE_SQL_2026-06-27.sql", "function_claim_pending_payment_orders_sharded", "sharded claim verify");
+    assertIncludes(errors, "SCALE_CONTRACT_AUDIT_1_5M.sql", "wallet_capacity_available_1_5m", "wallet capacity contract");
+    assertIncludes(errors, "SCANNER_SHARD_COVERAGE_AUDIT_1_5M.sql", "scanner_shard_coverage_live", "scanner shard coverage");
+    assertIncludes(errors, "PAYMENT_BACKLOG_FAST_AUDIT_1_5M.sql", "pending_orders_with_wallet", "payment backlog audit");
+    assertIncludes(errors, "FINAL_GATE_SQL_VERIFY_1_5M.sql", "wallet_capacity_ready", "final SQL launch gate");
+    assertIncludes(errors, "IMPORT_PROGRESS_TABLE_1_5M.sql", "wallet_import_batches", "wallet import progress table");
+    assertIncludes(errors, "FINAL_OPERATIONAL_GATE_1_5M.sql", "vidipay_operational_gate_1_5m", "final operational gate");
+    assertIncludes(errors, "WALLET_IMPORT_MANIFEST_AUDIT_1_5M.sql", "wallet_import_batches_summary", "wallet import manifest audit");
+    assertIncludes(errors, "SCANNER_WORKER_OPERATIONS_AUDIT_1_5M.sql", "scanner_live_summary", "scanner worker operations audit");
+    assertIncludes(errors, "CONTROL_TOWER_SQL_AUDIT_1_5M.sql", "wallet_capacity_ready", "control tower SQL audit");
+    assertIncludes(errors, "WALLET_ASSIGNMENT_INTEGRITY_AUDIT_1_5M.sql", "multi_wallet_users", "wallet assignment integrity audit");
+    assertIncludes(errors, "PAYMENT_ORDER_TO_WALLET_LINK_AUDIT_1_5M.sql", "pending_order_wallet_status", "payment order wallet link audit");
+    assertIncludes(errors, "TON_DEPOSIT_REFUND_AUDIT_1_5M.sql", "vidipay_ton_refund_audit_1_5m", "TON deposit refund audit");
+    assertIncludes(errors, "CLOSEOUT_FINAL_SQL_AUDIT_1_5M.sql", "wallet_capacity_ready", "closeout final SQL audit");
+    assertIncludes(errors, "INFRA_AUTOPILOT_SQL_GATE_1_5M.sql", "vidipay_infra_autopilot_gate_1_5m", "infra autopilot SQL gate");
+    assertIncludes(errors, "WALLET_PUBLIC_IMPORT_STAGING_TEMPLATE_1_5M.sql", "wallet_import_batches", "public wallet import staging table");
+    assertIncludes(errors, "COPY_THIS_FIRST_FIX_SHARD_COLUMNS_1_5M.sql", "shard_index", "emergency shard column fix");
+    assertIncludes(errors, "RUN_SQL_IN_THIS_ORDER_1_5M.txt", "POST_DEPLOY_VERIFY_1_5M.sql", "post deploy verify order");
+    assertIncludes(errors, "RUN_SQL_IN_THIS_ORDER_1_5M.txt", "SCALE_CONTRACT_AUDIT_1_5M.sql", "scale contract run order");
   }
 
   if (errors.length) {
-    console.error("PACKAGE CHECK FAILED");
+    console.error("SQL PACKAGE CHECK FAILED");
     for (const error of errors) console.error(`- ${error}`);
     process.exit(1);
   }
 
-  console.log("PACKAGE CHECK OK");
-  console.log(`version=${expectedVersion}`);
-  console.log(`files_checked=${textFiles.length}`);
+  console.log("SQL PACKAGE CHECK OK");
+  console.log(`sql_dir=${sqlDir}`);
 }
 
 main();

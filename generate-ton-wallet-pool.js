@@ -17,7 +17,7 @@ function readArg(name, fallback = "") {
 function normalizeCount(value) {
   const parsed = Number(value);
   if (!Number.isFinite(parsed) || parsed < 1) return 100000;
-  return Math.min(1500000, Math.floor(parsed));
+  return Math.min(3000000, Math.floor(parsed));
 }
 
 function normalizeBatchSize(value) {
